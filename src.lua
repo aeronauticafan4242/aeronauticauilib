@@ -18,6 +18,7 @@ edited: 1/26
 developers:
 discord Abstract#8007
 discord Deity#0228
+@corrective on Youtube - enhancements
 
 ]]
 
@@ -324,8 +325,8 @@ function Library:object(class, properties)
 		end,
 		Neon = function(value)
 			if not value then return end
-			-- неон-обводка: еле заметна в покое, разгорается при наведении/нажатии
-			-- value == "tab" -> категория табов, иначе -> кнопки/компоненты
+			-- neon outline: barely visible at rest, brightens on hover/press
+			-- value == "tab" -> tab category, otherwise -> buttons/components
 			local category = (value == "tab") and "tab" or "button"
 			local stroke = Instance.new("UIStroke")
 			stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
@@ -342,7 +343,7 @@ function Library:object(class, properties)
 			localObject.MouseLeave:Connect(function()
 				TweenService:Create(stroke, TweenInfo.new(0.2), {Transparency = 0.55}):Play()
 			end)
-			pcall(function() -- MouseButton1Down есть только у кнопок
+			pcall(function() -- MouseButton1Down only exists on buttons
 				localObject.MouseButton1Down:Connect(function()
 					TweenService:Create(stroke, TweenInfo.new(0.08), {Transparency = 0}):Play()
 				end)
@@ -417,13 +418,13 @@ function Library:lighten(color, f)
 	return Color3.fromHSV(h, math.clamp(s*f, 0, 1), math.clamp(v/f, 0, 1))
 end
 
-Library.NeonColor = Color3.fromRGB(170, 85, 255) -- базовый цвет неона (fallback)
--- Раздельные цвета неона для кнопок и табов (меняются цветпикерами в Settings)
+Library.NeonColor = Color3.fromRGB(170, 85, 255) -- base neon color (fallback)
+-- Separate neon colors for buttons and tabs (changed via the color pickers in Settings)
 Library.NeonColors = {
 	button = Color3.fromRGB(170, 85, 255),
 	tab = Color3.fromRGB(170, 85, 255)
 }
--- Реестр живых обводок, чтобы можно было перекрасить уже созданные элементы
+-- Registry of live strokes so already-created elements can be recolored
 Library.NeonStrokes = {
 	button = {},
 	tab = {}
@@ -683,17 +684,17 @@ function Library:create(options)
 		SliceScale = 1
 	})
 
-	-- ===== Неоновая переливающаяся фиолетовая обводка + свечение =====
-	-- Палитра (яркая, не тёмная). Можно поменять цвета здесь.
+	-- ===== Animated iridescent purple neon border + glow =====
+	-- Palette (bright, not dark). Change the colors here.
 	local NEON = {
-		Color3.fromRGB(170, 85, 255),   -- основной фиолет
-		Color3.fromRGB(120, 80, 255),   -- сине-фиолет
-		Color3.fromRGB(214, 120, 255),  -- розово-фиолет
-		Color3.fromRGB(90, 170, 255)    -- голубой блик
+		Color3.fromRGB(170, 85, 255),   -- main purple
+		Color3.fromRGB(120, 80, 255),   -- blue-purple
+		Color3.fromRGB(214, 120, 255),  -- pink-purple
+		Color3.fromRGB(90, 170, 255)    -- blue highlight
 	}
 
-	-- Мягкий ореол-свечение: отдельная СКРУГЛЁННАЯ рамка по габаритам окна с широкой полупрозрачной обводкой.
-	-- UIStroke всегда повторяет UICorner -> углы скруглены (раньше тут была картинка с квадратными углами).
+	-- Soft glow halo: a separate ROUNDED frame matching the window, with a wide semi-transparent stroke.
+	-- UIStroke always follows UICorner -> rounded corners (this used to be an image with square corners).
 	local neonGlowFrame = core:object("Frame", {
 		BackgroundTransparency = 1,
 		Size = UDim2.fromScale(1, 1),
@@ -707,7 +708,7 @@ function Library:create(options)
 		Transparency = 0.6
 	})
 
-	-- Яркая тонкая обводка по самому краю окна, окрашенная анимированным градиентом
+	-- Bright thin border on the window edge, colored by an animated gradient
 	local neonStroke = core:object("UIStroke", {
 		Thickness = 2,
 		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
@@ -724,11 +725,11 @@ function Library:create(options)
 	})
 	neonGradient.Parent = neonStroke.AbsoluteObject
 
-	-- тот же градиент на ореоле, чтобы свечение тоже переливалось
+	-- same gradient on the halo so the glow shimmers too
 	local neonGlowGradient = neonGradient:Clone()
 	neonGlowGradient.Parent = neonGlow.AbsoluteObject
 
-	-- Переливание: вращаем градиенты + мягко пульсируем толщиной обводки и яркостью ореола
+	-- Shimmer: rotate the gradients + gently pulse stroke thickness and halo brightness
 	local neonConn
 	neonConn = RunService.RenderStepped:Connect(function(dt)
 		local obj = core.AbsoluteObject
@@ -1017,7 +1018,7 @@ function Library:create(options)
 		Description = "Color of the window's neon border & glow.",
 		Style = Library.ColorPickerStyles.Legacy,
 		Callback = function(color)
-			-- переливающийся градиент строим из выбранного цвета (+ небольшой блик)
+			-- build the shimmering gradient from the picked color (+ a slight highlight)
 			local seq = ColorSequence.new({
 				ColorSequenceKeypoint.new(0.0, color),
 				ColorSequenceKeypoint.new(0.5, Library:lighten(color, 25)),
@@ -2892,7 +2893,7 @@ function Library:credit(options)
 	options = self:set_defaults({
 		Name = "Creditor",
 		Description = nil,
-		Height = 52 -- высота карточки; увеличь, если длинное имя переносится на 2 строки
+		Height = 52 -- card height; increase it if a long name wraps to 2 lines
 	}, options)
 	options.V3rmillion = options.V3rmillion or options.V3rm
 
@@ -2902,8 +2903,8 @@ function Library:credit(options)
 		Size = UDim2.new(1, -20, 0, options.Height)
 	}):round(8)
 
-	-- Имя: переносится на следующую строку, если не помещается (TextWrapped), выравнено по верху.
-	-- Ширина с запасом справа (-44), чтобы текст не залезал под иконку контакта.
+	-- Name: wraps to the next line if it doesn't fit (TextWrapped), top-aligned.
+	-- Width leaves room on the right (-44) so the text doesn't slip under the contact icon.
 	local name = creditContainer:object("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.fromOffset(10, 4),
