@@ -677,21 +677,22 @@ function Library:create(options)
 		Color3.fromRGB(90, 170, 255)    -- голубой блик
 	}
 
-	-- Мягкий внешний ореол позади окна (поверх чёрной тени)
-	local neonGlow = shadowHolder:object("ImageLabel", {
-		Centered = true,
+	-- Мягкий ореол-свечение: отдельная СКРУГЛЁННАЯ рамка по габаритам окна с широкой полупрозрачной обводкой.
+	-- UIStroke всегда повторяет UICorner -> углы скруглены (раньше тут была картинка с квадратными углами).
+	local neonGlowFrame = core:object("Frame", {
 		BackgroundTransparency = 1,
-		Size = UDim2.new(1, 64, 1, 64),
-		ZIndex = 0,
-		Image = "rbxassetid://6015897843",
-		ImageColor3 = NEON[1],
-		ImageTransparency = 0.5,
-		SliceCenter = Rect.new(47, 47, 450, 450),
-		ScaleType = Enum.ScaleType.Slice,
-		SliceScale = 1
+		Size = UDim2.fromScale(1, 1),
+		ZIndex = 0
+	}):round(16)
+
+	local neonGlow = neonGlowFrame:object("UIStroke", {
+		Thickness = 7,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		Color = NEON[1],
+		Transparency = 0.6
 	})
 
-	-- Яркая обводка по краю окна, окрашенная анимированным градиентом
+	-- Яркая тонкая обводка по самому краю окна, окрашенная анимированным градиентом
 	local neonStroke = core:object("UIStroke", {
 		Thickness = 2,
 		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
@@ -708,7 +709,11 @@ function Library:create(options)
 	})
 	neonGradient.Parent = neonStroke.AbsoluteObject
 
-	-- Переливание: вращаем градиент + мягко пульсируем толщиной обводки и яркостью ореола
+	-- тот же градиент на ореоле, чтобы свечение тоже переливалось
+	local neonGlowGradient = neonGradient:Clone()
+	neonGlowGradient.Parent = neonGlow.AbsoluteObject
+
+	-- Переливание: вращаем градиенты + мягко пульсируем толщиной обводки и яркостью ореола
 	local neonConn
 	neonConn = RunService.RenderStepped:Connect(function(dt)
 		local obj = core.AbsoluteObject
@@ -716,10 +721,13 @@ function Library:create(options)
 			neonConn:Disconnect()
 			return
 		end
-		neonGradient.Rotation = (neonGradient.Rotation + dt * 80) % 360
+		local rot = (neonGradient.Rotation + dt * 80) % 360
+		neonGradient.Rotation = rot
+		neonGlowGradient.Rotation = rot
 		local pulse = math.abs(math.sin(tick() * 1.5)) -- 0..1
 		neonStroke.Thickness = 1.6 + pulse * 1.3
-		neonGlow.ImageTransparency = 0.55 - pulse * 0.22
+		neonGlow.Thickness = 6 + pulse * 3
+		neonGlow.Transparency = 0.66 - pulse * 0.2
 	end)
 
 	local content = core:object("Frame", {
