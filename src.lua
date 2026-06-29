@@ -325,12 +325,17 @@ function Library:object(class, properties)
 		Neon = function(value)
 			if not value then return end
 			-- неон-обводка: еле заметна в покое, разгорается при наведении/нажатии
+			-- value == "tab" -> категория табов, иначе -> кнопки/компоненты
+			local category = (value == "tab") and "tab" or "button"
 			local stroke = Instance.new("UIStroke")
 			stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 			stroke.Thickness = 1
-			stroke.Color = Library.NeonColor or Color3.fromRGB(170, 85, 255)
+			stroke.Color = (Library.NeonColors and Library.NeonColors[category]) or Library.NeonColor or Color3.fromRGB(170, 85, 255)
 			stroke.Transparency = 0.55
 			stroke.Parent = localObject
+			if Library.NeonStrokes and Library.NeonStrokes[category] then
+				table.insert(Library.NeonStrokes[category], stroke)
+			end
 			localObject.MouseEnter:Connect(function()
 				TweenService:Create(stroke, TweenInfo.new(0.2), {Transparency = 0.1}):Play()
 			end)
@@ -412,7 +417,17 @@ function Library:lighten(color, f)
 	return Color3.fromHSV(h, math.clamp(s*f, 0, 1), math.clamp(v/f, 0, 1))
 end
 
-Library.NeonColor = Color3.fromRGB(170, 85, 255) -- цвет неон-обводки внутренних элементов
+Library.NeonColor = Color3.fromRGB(170, 85, 255) -- базовый цвет неона (fallback)
+-- Раздельные цвета неона для кнопок и табов (меняются цветпикерами в Settings)
+Library.NeonColors = {
+	button = Color3.fromRGB(170, 85, 255),
+	tab = Color3.fromRGB(170, 85, 255)
+}
+-- Реестр живых обводок, чтобы можно было перекрасить уже созданные элементы
+Library.NeonStrokes = {
+	button = {},
+	tab = {}
+}
 
 --[[ old lighten/darken functions, may revert if contrast gets fucked up
 
@@ -753,7 +768,7 @@ function Library:create(options)
 		Name = "hehehe siuuuuuuuuu",
 		BackgroundTransparency = 0,
 		Theme = {BackgroundColor3 = "Secondary"},
-		Neon = true,
+		Neon = "tab",
 		Size = UDim2.new(0, 125, 0, 25)
 	}):round(8)
 
@@ -997,6 +1012,47 @@ function Library:create(options)
 		end,
 	}
 
+	settingsTab:color_picker{
+		Name = "Window Glow Color",
+		Description = "Color of the window's neon border & glow.",
+		Style = Library.ColorPickerStyles.Legacy,
+		Callback = function(color)
+			-- переливающийся градиент строим из выбранного цвета (+ небольшой блик)
+			local seq = ColorSequence.new({
+				ColorSequenceKeypoint.new(0.0, color),
+				ColorSequenceKeypoint.new(0.5, Library:lighten(color, 25)),
+				ColorSequenceKeypoint.new(1.0, color)
+			})
+			neonGradient.Color = seq
+			neonGlowGradient.Color = seq
+			neonGlow.Color = color
+		end,
+	}
+
+	settingsTab:color_picker{
+		Name = "Button Glow Color",
+		Description = "Neon color of buttons, sliders, dropdowns, etc.",
+		Style = Library.ColorPickerStyles.Legacy,
+		Callback = function(color)
+			Library.NeonColors.button = color
+			for _, s in next, Library.NeonStrokes.button do
+				s.Color = color
+			end
+		end,
+	}
+
+	settingsTab:color_picker{
+		Name = "Tab Glow Color",
+		Description = "Neon color of the tab buttons.",
+		Style = Library.ColorPickerStyles.Legacy,
+		Callback = function(color)
+			Library.NeonColors.tab = color
+			for _, s in next, Library.NeonStrokes.tab do
+				s.Color = color
+			end
+		end,
+	}
+
 	local creditsTab = Library.tab(mt, {
 		Name = "Credits",
 		Internal = creditsTabIcon,
@@ -1008,6 +1064,12 @@ function Library:create(options)
 	creditsTab:credit{Name = "Abstract", Description = "UI Library Developer", Discord = "Abstract#8007", V3rmillion = "AbstractPoo"}
 	creditsTab:credit{Name = "Deity", Description = "UI Library Developer", Discord = "Deity#0228", V3rmillion = "0xDEITY"}
 	creditsTab:credit{Name = "Repository", Description = "UI Library Repository", Github="https://github.com/deeeity/mercury-lib/blob/master/src.lua"}
+	creditsTab:credit{
+		Name = "Tot Kto Iz Niotkuda Xploits",
+		Description = "Script Developer & UI Library Enhancements",
+		Youtube = "https://www.youtube.com/@corrective",
+		Height = 74 -- выше обычного, чтобы длинный ник поместился в 2 строки
+	}
 
 	return mt
 end
@@ -1202,7 +1264,7 @@ function Library:tab(options)
 		BackgroundTransparency = 1,
 		Parent = self.nilFolder.AbsoluteObject,
 		Theme = {BackgroundColor3 = "Secondary"},
-		Neon = true,
+		Neon = "tab",
 		Size = UDim2.new(0, 125, 0, 25),
 		Visible = false
 	}):round(8)
@@ -2829,31 +2891,36 @@ end
 function Library:credit(options)
 	options = self:set_defaults({
 		Name = "Creditor",
-		Description = nil
+		Description = nil,
+		Height = 52 -- высота карточки; увеличь, если длинное имя переносится на 2 строки
 	}, options)
 	options.V3rmillion = options.V3rmillion or options.V3rm
 
 	local creditContainer = (self.creditsContainer or self.container):object("Frame", {
 		Theme = {BackgroundColor3 = "Secondary"},
 		Neon = true,
-		Size = UDim2.new(1, -20, 0, 52)
+		Size = UDim2.new(1, -20, 0, options.Height)
 	}):round(8)
 
+	-- Имя: переносится на следующую строку, если не помещается (TextWrapped), выравнено по верху.
+	-- Ширина с запасом справа (-44), чтобы текст не залезал под иконку контакта.
 	local name = creditContainer:object("TextLabel", {
 		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(10, (options.Description and 5) or 0),
-		Size = (options.Description and UDim2.new(0.5, -10, 0, 22)) or UDim2.new(0.5, -10, 1, 0),
+		Position = UDim2.fromOffset(10, 4),
+		Size = UDim2.new(1, -44, 0, options.Description and (options.Height - 26) or options.Height),
 		Text = options.Name,
 		TextSize = 22,
+		TextWrapped = true,
 		Theme = {TextColor3 = "StrongText"},
-		TextXAlignment = Enum.TextXAlignment.Left
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top
 	})
 
 	if options.Description then
 		local description = creditContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
-			Position = UDim2.fromOffset(10, 27),
-			Size = UDim2.new(0.5, -10, 0, 20),
+			Position = UDim2.fromOffset(10, options.Height - 22),
+			Size = UDim2.new(1, -20, 0, 18),
 			Text = options.Description,
 			TextSize = 18,
 			Theme = {TextColor3 = "WeakText"},
@@ -2958,6 +3025,25 @@ function Library:credit(options)
 
 			v3rmillionContainer.MouseButton1Click:connect(function()
 				setclipboard(options.V3rmillion)
+			end)
+		end
+
+		if options.Youtube then
+			local youtubeContainer = creditContainer:object("TextButton", {
+				AnchorPoint = Vector2.new(1, 1),
+				Size = UDim2.fromOffset(24, 24),
+				Position = UDim2.new(1, -8, 1, -8),
+				BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+			}):round(5):tooltip("copy youtube")
+			local youtube = youtubeContainer:object("ImageLabel", {
+				Image = "http://www.roblox.com/asset/?id=645664329", -- YouTube-иконка (поменяй id здесь при необходимости)
+				Size = UDim2.new(1, -4, 1, -4),
+				Centered = true,
+				BackgroundTransparency = 1
+			})
+
+			youtubeContainer.MouseButton1Click:connect(function()
+				setclipboard(options.Youtube)
 			end)
 		end
 	end
