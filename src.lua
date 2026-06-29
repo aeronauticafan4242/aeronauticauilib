@@ -1063,12 +1063,12 @@ function Library:create(options)
 
 	creditsTab:credit{Name = "Abstract", Description = "UI Library Developer", Discord = "Abstract#8007", V3rmillion = "AbstractPoo"}
 	creditsTab:credit{Name = "Deity", Description = "UI Library Developer", Discord = "Deity#0228", V3rmillion = "0xDEITY"}
-	creditsTab:credit{Name = "Repository", Description = "UI Library Repository", Github="https://github.com/deeeity/mercury-lib/blob/master/src.lua"}
+	creditsTab:credit{Name = "Repository", Description = "UI Library Repository", Github="https://github.com/aeronauticafan4242/aeronauticauilib/tree/main"}
 	creditsTab:credit{
 		Name = "Tot Kto Iz Niotkuda Xploits",
 		Description = "Script Developer & UI Library Enhancements",
 		Youtube = "https://www.youtube.com/@corrective",
-		Height = 74 -- выше обычного, чтобы длинный ник поместился в 2 строки
+		Height = 74 -- haii
 	}
 
 	return mt
@@ -3036,7 +3036,7 @@ function Library:credit(options)
 				BackgroundColor3 = Color3.fromRGB(255, 0, 0)
 			}):round(5):tooltip("copy youtube")
 			local youtube = youtubeContainer:object("ImageLabel", {
-				Image = "http://www.roblox.com/asset/?id=645664329", -- YouTube-иконка (поменяй id здесь при необходимости)
+				Image = "http://www.roblox.com/asset/?id=4504423143", -- yt icon
 				Size = UDim2.new(1, -4, 1, -4),
 				Centered = true,
 				BackgroundTransparency = 1
