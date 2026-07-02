@@ -1169,11 +1169,16 @@ function Library:create(options)
 
 	local function refreshConfigDropdown()
 		if not configDropdown then return end
-		local list = Library:listConfigs()
 		pcall(function() configDropdown:Clear() end)
-		if #list > 0 then
-			pcall(function() configDropdown:AddItems(list) end)
-		end
+		-- Clear() уничтожает старые кнопки асинхронно (по завершении твина ~0.2с),
+		-- поэтому AddItems вызываем ПОСЛЕ этого, иначе Clear снесёт только что добавленные.
+		task.spawn(function()
+			task.wait(0.35)
+			local list = Library:listConfigs()
+			if #list > 0 then
+				pcall(function() configDropdown:AddItems(list) end)
+			end
+		end)
 	end
 
 	settingsTab:textbox{
