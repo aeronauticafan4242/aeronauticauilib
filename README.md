@@ -1,7 +1,8 @@
-# ✈️ aeronauticauilib
+# ✈️ Aeronautica UI Library
 
 > A sleek, modern Roblox UI library with an **animated neon glow**, **RGB gradients**, a built‑in **config system**, and **multi‑select dropdowns**.
 > Built on top of the Mercury UI framework and heavily enhanced.
+Initially was made for my own script(since mercury ui lib wasn't cappable of what I've wanted) but decided to release for everyone
 
 <p align="center">
   <img alt="lua" src="https://img.shields.io/badge/Language-Luau-000?style=flat-square&logo=lua">
