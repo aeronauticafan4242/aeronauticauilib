@@ -469,7 +469,29 @@ local function ensureConfigFolder()
 	end
 end
 
--- Текущие настройки (цвета неона) -> таблица
+-- ===== Registry of savable component states =====
+-- Каждый компонент (toggle/slider/dropdown/textbox/keybind) регистрирует get/set по своему имени.
+Library._savable = {}
+Library._pendingSettings = nil -- настройки, ожидающие компонентов (при загрузке до их создания)
+Library._saveAll = false       -- "Save all settings": сохранять состояния всех функций скрипта, не только меню
+
+-- Эти настройки меню сохраняются ВСЕГДА (даже если "Save all settings" выключен)
+local ALWAYS_SAVE = {
+	["Toggle Key"] = true,
+	["Lock Dragging"] = true,
+	["UI Drag Speed"] = true,
+	["Save all settings"] = true
+}
+
+function Library:_registerSavable(key, kind, getFn, setFn)
+	Library._savable[#Library._savable + 1] = { key = key, kind = kind, get = getFn, set = setFn }
+	-- если загрузка конфига произошла ДО создания этого компонента — применяем сохранённое значение сейчас
+	if Library._pendingSettings and Library._pendingSettings[key] ~= nil then
+		pcall(setFn, Library._pendingSettings[key])
+	end
+end
+
+-- Текущие настройки (цвета неона + тема + состояния компонентов) -> таблица
 function Library:getConfig()
 	local wn = Library._windowNeon
 	local windowColor = (wn and wn.glow and wn.glow.Color) or Library.NeonColor
@@ -481,11 +503,20 @@ function Library:getConfig()
 			break
 		end
 	end
+	-- состояния компонентов: меню — всегда, остальное — только при Save all settings
+	local settings = {}
+	for _, s in ipairs(Library._savable) do
+		if Library._saveAll or ALWAYS_SAVE[s.key] then
+			local ok, v = pcall(s.get)
+			if ok and v ~= nil then settings[s.key] = v end
+		end
+	end
 	return {
 		theme = themeName,
 		window = c3ToTable(windowColor),
 		button = c3ToTable(Library.NeonColors.button),
-		tab = c3ToTable(Library.NeonColors.tab)
+		tab = c3ToTable(Library.NeonColors.tab),
+		settings = settings
 	}
 end
 
@@ -498,6 +529,15 @@ function Library:applyConfig(cfg)
 	if cfg.window then Library:setWindowNeon(tableToC3(cfg.window)) end
 	if cfg.button then Library:setButtonNeon(tableToC3(cfg.button)) end
 	if cfg.tab then Library:setTabNeon(tableToC3(cfg.tab)) end
+	if type(cfg.settings) == "table" then
+		-- запоминаем для компонентов, которые создадутся ПОЗЖЕ (скрипт строит UI после Create)
+		Library._pendingSettings = cfg.settings
+		-- и сразу применяем к уже существующим
+		for _, s in ipairs(Library._savable) do
+			local v = cfg.settings[s.key]
+			if v ~= nil then pcall(s.set, v) end
+		end
+	end
 end
 
 -- Save работает и как "rewrite": если файл существует, он перезаписывается
@@ -1148,6 +1188,15 @@ function Library:create(options)
 		end,
 	}
 
+	settingsTab:toggle{
+		Name = "Save all settings",
+		Description = "Also save every script feature's state to configs (not just the menu). Off by default.",
+		StartingState = false,
+		Callback = function(state)
+			Library._saveAll = state
+		end,
+	}
+
 	settingsTab:color_picker{
 		Name = "Window Glow Color",
 		Description = "Color of the window's neon border & glow.",
@@ -1794,6 +1843,10 @@ function Library:toggle(options)
 
 	if options.StartingState then methods:SetState(true) end
 
+	Library:_registerSavable(options.Name, "toggle",
+		function() return toggled end,
+		function(v) methods:SetState(v and true or false) end)
+
 	return methods
 end
 
@@ -1900,6 +1953,7 @@ function Library:dropdown(options)
 	-- ===== Multi-select support =====
 	local multiSelect = options.MultiSelect
 	local selectedSet = {} -- value -> true
+	local currentSingle = nil -- текущий выбор для одиночного дропдауна (для сохранения)
 	local function getSelectedList()
 		local out = {}
 		for v in pairs(selectedSet) do out[#out + 1] = v end
@@ -1968,6 +2022,7 @@ function Library:dropdown(options)
 					updateSelectedText()
 					options.Callback(getSelectedList())
 				else
+					currentSingle = value
 					toggle()
 					selectedText.Text = newItem.Text
 					selectedText:tween{Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05}
@@ -2153,6 +2208,48 @@ function Library:dropdown(options)
 	function methods:GetSelected()
 		return getSelectedList()
 	end
+
+	-- программно выбрать значения (MultiSelect: массив; одиночный: одно значение)
+	local function applySelection(v)
+		if multiSelect then
+			local want = {}
+			if type(v) == "table" then
+				for _, val in ipairs(v) do want[val] = true end
+			end
+			selectedSet = {}
+			for _, it in pairs(items) do
+				local pair, btn = it[1], it[2]
+				if type(pair) == "table" and btn then
+					local label, value = pair[1], pair[2]
+					if want[value] then
+						selectedSet[value] = true
+						btn.Text = "✔ " .. label
+					else
+						btn.Text = label
+					end
+				end
+			end
+			updateSelectedText()
+			task.spawn(function() options.Callback(getSelectedList()) end)
+		else
+			currentSingle = v
+			for _, it in pairs(items) do
+				local pair, btn = it[1], it[2]
+				if type(pair) == "table" and btn and pair[2] == v then
+					selectedText.Text = btn.Text
+					selectedText:tween{ Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05 }
+					break
+				end
+			end
+			task.spawn(function() options.Callback(v) end)
+		end
+	end
+
+	Library:_registerSavable(options.Name, "dropdown",
+		function()
+			if multiSelect then return getSelectedList() else return currentSingle end
+		end,
+		applySelection)
 
 	return methods
 end
@@ -3565,6 +3662,14 @@ function Library:keybind(options)
 		keybindDisplay:tween{Size = UDim2.fromOffset(keybindDisplay.TextBounds.X + 20, 20), Length = 0.05}
 	end
 
+	Library:_registerSavable(options.Name, "keybind",
+		function() return options.Keybind and options.Keybind.Name or nil end,
+		function(v)
+			if type(v) ~= "string" then return end
+			local ok, kc = pcall(function() return Enum.KeyCode[v] end)
+			if ok and kc then methods:Set(kc) end
+		end)
+
 	return methods
 end
 
@@ -3855,6 +3960,16 @@ function Library:slider(options)
 		sliderLine:tween{Size = UDim2.fromScale(((value - options.Min) / (options.Max - options.Min)), 1)}
 	end
 
+	Library:_registerSavable(options.Name, "slider",
+		function() return tonumber(valueText.Text) or options.Default end,
+		function(v)
+			v = math.clamp(tonumber(v) or options.Default, options.Min, options.Max)
+			valueText.Text = v
+			valueText.Size = UDim2.fromOffset(valueText.TextBounds.X + 20, 20)
+			sliderLine:tween{Size = UDim2.fromScale(((v - options.Min) / (options.Max - options.Min)), 1)}
+			task.spawn(function() options.Callback(v) end)
+		end)
+
 	return methods
 end
 
@@ -3969,6 +4084,13 @@ function Library:textbox(options)
 	function methods:Set(text)
 		textBox.Text = text
 	end
+
+	Library:_registerSavable(options.Name, "textbox",
+		function() return textBox.Text end,
+		function(v)
+			textBox.Text = tostring(v)
+			task.spawn(function() options.Callback(textBox.Text) end)
+		end)
 
 	return methods
 end
