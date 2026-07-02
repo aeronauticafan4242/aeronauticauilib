@@ -473,7 +473,16 @@ end
 function Library:getConfig()
 	local wn = Library._windowNeon
 	local windowColor = (wn and wn.glow and wn.glow.Color) or Library.NeonColor
+	-- имя текущей темы (для сохранения)
+	local themeName
+	for name, t in next, Library.Themes do
+		if t == Library.CurrentTheme then
+			themeName = name
+			break
+		end
+	end
 	return {
+		theme = themeName,
 		window = c3ToTable(windowColor),
 		button = c3ToTable(Library.NeonColors.button),
 		tab = c3ToTable(Library.NeonColors.tab)
@@ -482,6 +491,10 @@ end
 
 function Library:applyConfig(cfg)
 	if type(cfg) ~= "table" then return end
+	-- тему применяем первой (она перекрашивает тематические элементы)
+	if cfg.theme and Library.Themes[cfg.theme] then
+		pcall(function() Library:change_theme(Library.Themes[cfg.theme]) end)
+	end
 	if cfg.window then Library:setWindowNeon(tableToC3(cfg.window)) end
 	if cfg.button then Library:setButtonNeon(tableToC3(cfg.button)) end
 	if cfg.tab then Library:setTabNeon(tableToC3(cfg.tab)) end
