@@ -1884,6 +1884,21 @@ function Library:dropdown(options)
 		end
 	end
 
+	-- ===== Multi-select support =====
+	local multiSelect = options.MultiSelect
+	local selectedSet = {} -- value -> true
+	local function getSelectedList()
+		local out = {}
+		for v in pairs(selectedSet) do out[#out + 1] = v end
+		return out
+	end
+	local function updateSelectedText()
+		local n = 0
+		for _ in pairs(selectedSet) do n = n + 1 end
+		selectedText.Text = (n == 0) and options.StartingText or (tostring(n) .. " selected")
+		selectedText:tween{ Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05 }
+	end
+
 	local toggle;
 
 	for i, item in next, items do
@@ -1928,10 +1943,23 @@ function Library:dropdown(options)
 			end)
 
 			newItem.MouseButton1Click:connect(function()
-				toggle()
-				selectedText.Text = newItem.Text
-				selectedText:tween{Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05}
-				options.Callback(value)
+				if multiSelect then
+					-- переключаем выбор, НЕ закрываем список; ✔ показывает выбранные
+					if selectedSet[value] then
+						selectedSet[value] = nil
+						newItem.Text = label
+					else
+						selectedSet[value] = true
+						newItem.Text = "✔ " .. label
+					end
+					updateSelectedText()
+					options.Callback(getSelectedList())
+				else
+					toggle()
+					selectedText.Text = newItem.Text
+					selectedText:tween{Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05}
+					options.Callback(value)
+				end
 			end)
 		end
 	end
@@ -2082,18 +2110,35 @@ function Library:dropdown(options)
 				end)
 
 				newItem.MouseButton1Click:connect(function()
-					toggle()
-					selectedText.Text = newItem.Text
-					selectedText:tween{Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05}
-					options.Callback(value)
+					if multiSelect then
+						if selectedSet[value] then
+							selectedSet[value] = nil
+							newItem.Text = label
+						else
+							selectedSet[value] = true
+							newItem.Text = "✔ " .. label
+						end
+						updateSelectedText()
+						options.Callback(getSelectedList())
+					else
+						toggle()
+						selectedText.Text = newItem.Text
+						selectedText:tween{Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05}
+						options.Callback(value)
+					end
 				end)
-			end		
+			end
 		end
 
 		Library._resize_tab({
 			container = container,
 			layout = layout
 		})
+	end
+
+	-- вернуть список выбранных (для MultiSelect)
+	function methods:GetSelected()
+		return getSelectedList()
 	end
 
 	return methods
