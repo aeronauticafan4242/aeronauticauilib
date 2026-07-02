@@ -429,6 +429,126 @@ Library.NeonStrokes = {
 	tab = {}
 }
 
+-- ===== Neon color setters (used by color pickers AND config load) =====
+function Library:setWindowNeon(color)
+	local wn = Library._windowNeon
+	if not wn then return end
+	local seq = ColorSequence.new({
+		ColorSequenceKeypoint.new(0.0, color),
+		ColorSequenceKeypoint.new(0.5, Library:lighten(color, 25)),
+		ColorSequenceKeypoint.new(1.0, color)
+	})
+	if wn.grad then wn.grad.Color = seq end
+	if wn.glowGrad then wn.glowGrad.Color = seq end
+	if wn.glow then wn.glow.Color = color end
+end
+
+function Library:setButtonNeon(color)
+	Library.NeonColors.button = color
+	for _, s in next, Library.NeonStrokes.button do s.Color = color end
+end
+
+function Library:setTabNeon(color)
+	Library.NeonColors.tab = color
+	for _, s in next, Library.NeonStrokes.tab do s.Color = color end
+end
+
+-- ===== Config system (save / load / delete / autoload) =====
+local CONFIG_FOLDER = "GrindnauticaConfigs"
+
+local function c3ToTable(c)
+	return { math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5) }
+end
+local function tableToC3(t)
+	return Color3.fromRGB(t[1] or 255, t[2] or 255, t[3] or 255)
+end
+
+local function ensureConfigFolder()
+	if makefolder and isfolder and not isfolder(CONFIG_FOLDER) then
+		pcall(makefolder, CONFIG_FOLDER)
+	end
+end
+
+-- Текущие настройки (цвета неона) -> таблица
+function Library:getConfig()
+	local wn = Library._windowNeon
+	local windowColor = (wn and wn.glow and wn.glow.Color) or Library.NeonColor
+	return {
+		window = c3ToTable(windowColor),
+		button = c3ToTable(Library.NeonColors.button),
+		tab = c3ToTable(Library.NeonColors.tab)
+	}
+end
+
+function Library:applyConfig(cfg)
+	if type(cfg) ~= "table" then return end
+	if cfg.window then Library:setWindowNeon(tableToC3(cfg.window)) end
+	if cfg.button then Library:setButtonNeon(tableToC3(cfg.button)) end
+	if cfg.tab then Library:setTabNeon(tableToC3(cfg.tab)) end
+end
+
+-- Save работает и как "rewrite": если файл существует, он перезаписывается
+function Library:saveConfig(name)
+	if not (writefile and name and name ~= "") then return false end
+	ensureConfigFolder()
+	local ok = pcall(function()
+		writefile(CONFIG_FOLDER .. "/" .. name .. ".json", HTTPService:JSONEncode(Library:getConfig()))
+	end)
+	return ok
+end
+
+function Library:loadConfig(name)
+	if not (readfile and isfile and name and name ~= "") then return false end
+	local path = CONFIG_FOLDER .. "/" .. name .. ".json"
+	if not isfile(path) then return false end
+	local ok, data = pcall(function() return HTTPService:JSONDecode(readfile(path)) end)
+	if ok and data then
+		Library:applyConfig(data)
+		return true
+	end
+	return false
+end
+
+function Library:deleteConfig(name)
+	local path = CONFIG_FOLDER .. "/" .. name .. ".json"
+	if delfile and isfile and isfile(path) then
+		pcall(delfile, path)
+		-- если удаляемый конфиг был автозагрузкой — сбрасываем автозагрузку
+		if Library:getAutoload() == name then Library:setAutoload("") end
+		return true
+	end
+	return false
+end
+
+function Library:listConfigs()
+	local out = {}
+	if listfiles and isfolder and isfolder(CONFIG_FOLDER) then
+		local ok, files = pcall(listfiles, CONFIG_FOLDER)
+		if ok and files then
+			for _, f in ipairs(files) do
+				local n = tostring(f):match("([^/\\]+)%.json$")
+				if n then out[#out + 1] = n end
+			end
+		end
+	end
+	return out
+end
+
+function Library:setAutoload(name)
+	if not writefile then return end
+	ensureConfigFolder()
+	pcall(function() writefile(CONFIG_FOLDER .. "/_autoload.cfg", name or "") end)
+end
+
+function Library:getAutoload()
+	local path = CONFIG_FOLDER .. "/_autoload.cfg"
+	if readfile and isfile and isfile(path) then
+		local ok, v = pcall(readfile, path)
+		if ok and v and v ~= "" then return v end
+	end
+	return nil
+end
+
 --[[ old lighten/darken functions, may revert if contrast gets fucked up
 
 	function Library:darken(color, f)
@@ -728,6 +848,9 @@ function Library:create(options)
 	local neonGlowGradient = neonGradient:Clone()
 	neonGlowGradient.Parent = neonGlow.AbsoluteObject
 
+	-- сохраняем ссылки, чтобы цветпикеры и загрузка конфига могли перекрашивать окно
+	Library._windowNeon = { grad = neonGradient, glowGrad = neonGlowGradient, glow = neonGlow }
+
 	-- Shimmer: rotate the gradients + gently pulse stroke thickness and halo brightness
 	local neonConn
 	neonConn = RunService.RenderStepped:Connect(function(dt)
@@ -1017,15 +1140,7 @@ function Library:create(options)
 		Description = "Color of the window's neon border & glow.",
 		Style = Library.ColorPickerStyles.Legacy,
 		Callback = function(color)
-			-- build the shimmering gradient from the picked color (+ a slight highlight)
-			local seq = ColorSequence.new({
-				ColorSequenceKeypoint.new(0.0, color),
-				ColorSequenceKeypoint.new(0.5, Library:lighten(color, 25)),
-				ColorSequenceKeypoint.new(1.0, color)
-			})
-			neonGradient.Color = seq
-			neonGlowGradient.Color = seq
-			neonGlow.Color = color
+			Library:setWindowNeon(color)
 		end,
 	}
 
@@ -1034,10 +1149,7 @@ function Library:create(options)
 		Description = "Neon color of buttons, sliders, dropdowns, etc.",
 		Style = Library.ColorPickerStyles.Legacy,
 		Callback = function(color)
-			Library.NeonColors.button = color
-			for _, s in next, Library.NeonStrokes.button do
-				s.Color = color
-			end
+			Library:setButtonNeon(color)
 		end,
 	}
 
@@ -1046,10 +1158,109 @@ function Library:create(options)
 		Description = "Neon color of the tab buttons.",
 		Style = Library.ColorPickerStyles.Legacy,
 		Callback = function(color)
-			Library.NeonColors.tab = color
-			for _, s in next, Library.NeonStrokes.tab do
-				s.Color = color
+			Library:setTabNeon(color)
+		end,
+	}
+
+	-- ===== Configs (save / load / delete / autoload) =====
+	local selectedConfig = nil
+	local configNameInput = ""
+	local configDropdown
+
+	local function refreshConfigDropdown()
+		if not configDropdown then return end
+		local list = Library:listConfigs()
+		pcall(function() configDropdown:Clear() end)
+		if #list > 0 then
+			pcall(function() configDropdown:AddItems(list) end)
+		end
+	end
+
+	settingsTab:textbox{
+		Name = "Config Name",
+		Description = "Name used when saving a config",
+		Callback = function(text)
+			configNameInput = text or ""
+		end,
+	}
+
+	configDropdown = settingsTab:dropdown{
+		Name = "Configs",
+		StartingText = "Select config...",
+		Description = "Pick a saved config to load / delete / autoload",
+		Items = Library:listConfigs(),
+		Callback = function(item)
+			selectedConfig = item
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Save / Rewrite Config",
+		Description = "Save current colors under the entered name (overwrites if exists)",
+		Callback = function()
+			if configNameInput == "" then
+				mt:notification{ Title = "Configs", Text = "Enter a config name first", Duration = 3 }
+				return
 			end
+			if Library:saveConfig(configNameInput) then
+				refreshConfigDropdown()
+				mt:notification{ Title = "Configs", Text = "Saved: " .. configNameInput, Duration = 3 }
+			else
+				mt:notification{ Title = "Configs", Text = "Save failed (executor lacks writefile?)", Duration = 4 }
+			end
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Load Config",
+		Description = "Load the config selected in the dropdown",
+		Callback = function()
+			if not selectedConfig then
+				mt:notification{ Title = "Configs", Text = "Select a config in the dropdown", Duration = 3 }
+				return
+			end
+			if Library:loadConfig(selectedConfig) then
+				mt:notification{ Title = "Configs", Text = "Loaded: " .. selectedConfig, Duration = 3 }
+			else
+				mt:notification{ Title = "Configs", Text = "Load failed", Duration = 3 }
+			end
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Delete Config",
+		Description = "Delete the config selected in the dropdown",
+		Callback = function()
+			if not selectedConfig then
+				mt:notification{ Title = "Configs", Text = "Select a config in the dropdown", Duration = 3 }
+				return
+			end
+			Library:deleteConfig(selectedConfig)
+			mt:notification{ Title = "Configs", Text = "Deleted: " .. selectedConfig, Duration = 3 }
+			selectedConfig = nil
+			refreshConfigDropdown()
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Set as Autoload",
+		Description = "Auto-load the selected config every time the script starts",
+		Callback = function()
+			if not selectedConfig then
+				mt:notification{ Title = "Configs", Text = "Select a config in the dropdown", Duration = 3 }
+				return
+			end
+			Library:setAutoload(selectedConfig)
+			mt:notification{ Title = "Configs", Text = "Autoload set: " .. selectedConfig, Duration = 3 }
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Clear Autoload",
+		Description = "Stop auto-loading any config on startup",
+		Callback = function()
+			Library:setAutoload("")
+			mt:notification{ Title = "Configs", Text = "Autoload cleared", Duration = 3 }
 		end,
 	}
 
@@ -1070,6 +1281,15 @@ function Library:create(options)
 		Youtube = "https://www.youtube.com/@corrective",
 		Height = 74 -- haii
 	}
+
+	-- Автозагрузка сохранённого конфига (если выбран через "Set as Autoload")
+	do
+		local auto = Library:getAutoload()
+		if auto then
+			pcall(function() Library:loadConfig(auto) end)
+			pcall(function() if configDropdown then configDropdown:Set(auto) end end)
+		end
+	end
 
 	return mt
 end
