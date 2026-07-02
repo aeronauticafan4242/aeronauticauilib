@@ -2,7 +2,6 @@
 
 > A sleek, modern Roblox UI library with an **animated neon glow**, **RGB gradients**, a built‑in **config system**, and **multi‑select dropdowns**.
 > Built on top of the Mercury UI framework and heavily enhanced.
-Initially was made for my own script(since mercury ui lib wasn't cappable of what I've wanted) but decided to release for everyone
 
 <p align="center">
   <img alt="lua" src="https://img.shields.io/badge/Language-Luau-000?style=flat-square&logo=lua">
@@ -227,12 +226,12 @@ Library:setTabNeon(Color3.fromRGB(120, 200, 255))   -- tab buttons
 
 ## 💾 Config System
 
-Save & restore your neon colors. Managed visually from the **Settings** tab
+Save & restore your setup. Managed visually from the **Settings** tab
 (**Config Name** box → **Save / Rewrite**, then **Load / Delete / Set as Autoload / Clear Autoload**),
 or programmatically:
 
 ```lua
-Library:saveConfig("MyTheme")   -- save/overwrite current colors
+Library:saveConfig("MyTheme")   -- save/overwrite current setup
 Library:loadConfig("MyTheme")   -- apply a saved config
 Library:deleteConfig("MyTheme") -- remove it
 Library:listConfigs()           -- -> { "MyTheme", "Neon", ... }
@@ -241,8 +240,24 @@ Library:setAutoload("MyTheme")  -- auto-apply this config on every launch
 Library:getAutoload()           -- -> "MyTheme" or nil
 ```
 
-> Configs are stored as JSON in the executor's `GrindnauticaConfigs/` folder.
-> **Autoload** applies your chosen config automatically the moment the UI is created — set it once and forget it.
+### What gets saved
+
+Every config **always** stores:
+- 🎨 The selected **theme**
+- 🟣 **Neon colors** (window / buttons / tabs)
+- ⚙️ Core **menu settings**: `Toggle Key`, `Lock Dragging`, `UI Drag Speed`
+
+### 🗃️ Save all settings
+
+Enable the **`Save all settings`** toggle (in the Settings tab, **off by default**) to also persist
+**every component's state across your whole UI** — toggles, sliders, textboxes, keybinds and
+**multi‑select dropdowns** included. Perfect for hubs where users don't want to reconfigure each launch.
+
+> - Component states are keyed by their **Name**, so give components unique names.
+> - On **autoload / load**, saved states are re‑applied even to components that are created *after* the
+>   window (your tabs are built after `Create`) — the library re‑applies them as each component appears.
+> - Configs are stored as JSON in the executor's `GrindnauticaConfigs/` folder.
+> - **Autoload** applies your chosen config automatically the moment the UI is created — set it once and forget it.
 
 ---
 
