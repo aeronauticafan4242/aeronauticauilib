@@ -1,4 +1,4 @@
-# ✈️ Aeronautica UI Library
+# ✈️ aeronauticauilib
 
 > A sleek, modern Roblox UI library with an **animated neon glow**, **RGB gradients**, a built‑in **config system**, and **multi‑select dropdowns**.
 > Built on top of the Mercury UI framework and heavily enhanced.
@@ -17,6 +17,8 @@
 - 🌈 **Flowing RGB gradients** on text and accents
 - 🎛️ Full component set: toggles, buttons, sliders, dropdowns, textboxes, keybinds, color pickers
 - ✅ **Multi‑select dropdowns** (new!)
+- 🪟 **Appearance controls** *(new!)* — window **opacity**, **cursor particles**, window **size**, **element size** & **layout mode** (columns), plus **Reset Appearance**, all in the Settings tab
+- 📝 **Auto‑wrapping text** *(new!)* — long descriptions wrap to new lines and grow the row; names never overlap the controls
 - 💾 **Config system** — save / load / delete / rewrite + **autoload** on startup
 - 🎨 Live **color customization** for window / buttons / tabs (built‑in Settings tab)
 - 🔔 Clean notifications & prompts
@@ -224,6 +226,39 @@ Library:setTabNeon(Color3.fromRGB(120, 200, 255))   -- tab buttons
 
 ---
 
+## 🪟 Appearance & Layout *(new)*
+
+The **Settings** tab now includes four live controls so every user can tailor the UI to their screen and taste. All four are **saved with configs** (and autoload), so a user sets them once and they stick.
+
+| Control | What it does | Default |
+|---|---|---|
+| **Window Opacity** | Transparency of the whole window (100 = solid glass). | `80` (slightly translucent) |
+| **Particles** | Little particles that follow your cursor over the window. | `off` |
+| **Particle Type** | Style of the cursor particles: `Sparks`, `Neon Trail`, `Bubbles`, `Stars`. | `Sparks` |
+| **Window Size** | Overall UI scale — shrink the entire window for laptops / small screens. | `100%` (current size) |
+| **Element Size** | Size of every element (buttons, sliders, dropdowns…), independent of window size. | `100%` |
+| **Layout Mode** | Arrange elements as a **Vertical (List)**, **2 Columns**, or **3 Columns** — so a single button no longer has to hog a whole row. | `Vertical (List)` |
+| **Reset Appearance** | One button to reset all of the above back to defaults. | — |
+
+These are **non‑destructive and independent**: opacity only touches the window fill, window size is a `UIScale` on the window, element size is a per‑component `UIScale`, layout mode reflows each tab, and particles live on their own click‑through overlay. At their defaults the UI looks **exactly** like before — nothing in existing scripts changes unless the user opts in.
+
+**Long descriptions now wrap** onto multiple lines and grow the element's height instead of running off the window, and element names truncate cleanly so text never overlaps toggles/boxes/icons.
+
+You can also drive them from code:
+
+```lua
+Library:setWindowOpacity(80)          -- 0..100 (100 = solid)
+Library:setWindowScale(90)            -- percent; ~60..115 recommended
+Library:setElementScale(110)          -- percent; ~80..130 recommended
+Library:setLayoutMode("2 Columns")    -- "Vertical (List)" | "2 Columns" | "3 Columns"
+Library:setParticlesEnabled(true)     -- cursor particles on/off
+Library:setParticleType("Neon Trail") -- "Sparks" | "Neon Trail" | "Bubbles" | "Stars"
+```
+
+> 💡 Columns work with every component — even dropdowns, which resize themselves when opened, keep their column width. The theme picker is kept full‑width automatically so its previews never get squeezed.
+
+---
+
 ## 💾 Config System
 
 Save & restore your setup. Managed visually from the **Settings** tab
@@ -246,6 +281,7 @@ Every config **always** stores:
 - 🎨 The selected **theme**
 - 🟣 **Neon colors** (window / buttons / tabs)
 - ⚙️ Core **menu settings**: `Toggle Key`, `Lock Dragging`, `UI Drag Speed`
+- 🪟 **Appearance**: `Window Opacity`, `Particles`, `Particle Type`, `Window Size`, `Element Size`, `Layout Mode`
 
 ### 🗃️ Save all settings
 
