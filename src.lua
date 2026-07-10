@@ -494,7 +494,9 @@ local ALWAYS_SAVE = {
 	["Window Opacity"] = true,
 	["Window Size"] = true,
 	["Element Size"] = true,
-	["Layout Mode"] = true
+	["Layout Mode"] = true,
+	["Particles"] = true,
+	["Particle Type"] = true
 }
 
 function Library:_registerSavable(key, kind, getFn, setFn)
@@ -691,11 +693,58 @@ end
 function Library:_skinChildren(parentInst)
 	if not parentInst then return end
 	for _, ch in ipairs(parentInst:GetChildren()) do
-		if ch:IsA("GuiObject") and not ch:GetAttribute("_skinned") then
+		-- _noskin: элементы со своей внутренней вёрсткой (напр. выбор темы с UIGridLayout),
+		-- которым нельзя менять ширину под колонки — иначе содержимое уезжает за край.
+		if ch:IsA("GuiObject") and not ch:GetAttribute("_skinned") and not ch:GetAttribute("_noskin") then
 			ch:SetAttribute("_skinned", true)
 			Library._skinComponents[#Library._skinComponents + 1] = ch
 			pcall(function() Library:_styleComponent(ch) end)
 		end
+	end
+end
+
+-- Адаптивный текст строки компонента:
+--  * имя обрезается «…» и не налезает на правый контрол (галочку/бокс/иконку);
+--  * описание переносится на новые строки и РАСТИТ высоту строки под текст.
+-- Высота считается в локальных координатах (делим AbsoluteSize на общий масштаб),
+-- поэтому корректно работает вместе с Window Size и Element Size.
+function Library:_adaptRow(tabSelf, o)
+	local raw = o.container and (o.container.AbsoluteObject or o.container)
+	if not raw then return end
+	local pad = o.pad or 55
+	if o.name then
+		pcall(function()
+			o.name.TextTruncate = Enum.TextTruncate.AtEnd
+			local ny = o.name.Size.Y
+			o.name.Size = UDim2.new(1, -pad, ny.Scale, ny.Offset)
+		end)
+	end
+	if o.desc then
+		local descInst = o.desc.AbsoluteObject or o.desc
+		pcall(function()
+			o.desc.TextWrapped = true
+			o.desc.TextYAlignment = Enum.TextYAlignment.Top
+			o.desc.AutomaticSize = Enum.AutomaticSize.Y
+			o.desc.Size = UDim2.new(1, -pad, 0, 0)
+		end)
+		local top    = o.top or 27
+		local base   = o.base or raw.Size.Y.Offset
+		local bottom = o.bottom or 10
+		local function fit()
+			local total = (Library.WindowScale or 1) * (Library.ElementScale or 1)
+			if total <= 0 then total = 1 end
+			local dh = descInst.AbsoluteSize.Y / total
+			local newH = math.max(base, top + dh + bottom)
+			-- публикуем «базовую» высоту строки: компоненты со своим ресайзом
+			-- (дропдаун) читают её, чтобы не сбрасывать высоту при сворачивании
+			pcall(function() raw:SetAttribute("_rowBase", newH) end)
+			if math.abs(newH - raw.Size.Y.Offset) > 0.5 then
+				raw.Size = UDim2.new(raw.Size.X.Scale, raw.Size.X.Offset, 0, newH)
+				pcall(function() tabSelf:_resize_tab() end)
+			end
+		end
+		pcall(function() descInst:GetPropertyChangedSignal("AbsoluteSize"):Connect(fit) end)
+		task.defer(fit)
 	end
 end
 
@@ -755,6 +804,19 @@ function Library:setLayoutMode(mode)
 		pcall(function() Library:_styleComponent(inst) end)
 	end
 	Library:_reflowCanvas()
+end
+
+-- ===== Курсорные партиклы (отклик окна на движение мыши) =====
+Library._particles = { enabled = false, kind = "Sparks" }
+
+function Library:setParticlesEnabled(on)
+	Library._particles.enabled = on and true or false
+end
+
+function Library:setParticleType(kind)
+	if kind and kind ~= "" then
+		Library._particles.kind = kind
+	end
 end
 
 --[[ old lighten/darken functions, may revert if contrast gets fucked up
@@ -920,6 +982,88 @@ function Library:create(options)
 	Library._windowScaleObj.Name = "_windowScale"
 	Library._windowScaleObj.Scale = Library.WindowScale or 1
 	Library._windowScaleObj.Parent = core.AbsoluteObject
+
+	-- ===== Слой курсорных партиклов =====
+	do
+		local particleLayer = core:object("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.fromScale(1, 1),
+			ClipsDescendants = true,
+			Active = false,
+			ZIndex = 6
+		})
+		Library._particleLayer = particleLayer
+		local rnd = Random.new()
+		local lastSpawn = 0
+
+		local function neon()
+			return (Library.NeonColors and Library.NeonColors.button) or Library.NeonColor or Color3.fromRGB(170, 85, 255)
+		end
+
+		local function spawn(lx, ly)
+			local kind = Library._particles.kind
+			local col = neon()
+			if kind == "Bubbles" then
+				local sz = rnd:NextInteger(9, 17)
+				local p = particleLayer:object("Frame", {
+					BackgroundColor3 = col, BackgroundTransparency = 0.7,
+					Position = UDim2.fromOffset(lx - sz / 2, ly - sz / 2),
+					Size = UDim2.fromOffset(sz, sz), ZIndex = 6
+				}):round(100)
+				p:object("UIStroke", { Color = col, Transparency = 0.2, Thickness = 1 })
+				p:tween({ Position = UDim2.fromOffset(lx - sz, ly - rnd:NextInteger(35, 65)), Size = UDim2.fromOffset(sz * 2, sz * 2), BackgroundTransparency = 1, Length = 0.85 },
+					function() p.AbsoluteObject:Destroy() end)
+			elseif kind == "Stars" then
+				-- маленький неоновый «ромб» (повёрнутый квадрат) — не зависит от шрифта
+				local s = rnd:NextInteger(8, 14)
+				local p = particleLayer:object("Frame", {
+					BackgroundColor3 = col, BackgroundTransparency = 0.15,
+					Position = UDim2.fromOffset(lx - s / 2, ly - s / 2), Size = UDim2.fromOffset(s, s),
+					ZIndex = 6, Rotation = 45
+				}):round(2)
+				p:object("UIStroke", { Color = col, Transparency = 0, Thickness = 1 })
+				p:tween({ Rotation = 225, BackgroundTransparency = 1, Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(lx, ly - rnd:NextInteger(22, 52)), Length = 0.75 },
+					function() p.AbsoluteObject:Destroy() end)
+			elseif kind == "Neon Trail" then
+				local sz = rnd:NextInteger(6, 10)
+				local p = particleLayer:object("Frame", {
+					BackgroundColor3 = col,
+					Position = UDim2.fromOffset(lx - sz / 2, ly - sz / 2),
+					Size = UDim2.fromOffset(sz, sz), ZIndex = 6
+				}):round(100)
+				p:object("UIStroke", { Color = col, Transparency = 0, Thickness = 1 })
+				p:tween({ Size = UDim2.fromOffset(1, 1), BackgroundTransparency = 1, Length = 0.5 },
+					function() p.AbsoluteObject:Destroy() end)
+			else -- Sparks (по умолчанию)
+				local sz = rnd:NextInteger(3, 6)
+				local dx = rnd:NextInteger(-18, 18)
+				local p = particleLayer:object("Frame", {
+					BackgroundColor3 = col,
+					Position = UDim2.fromOffset(lx, ly),
+					Size = UDim2.fromOffset(sz, sz), ZIndex = 6
+				}):round(100)
+				p:tween({ Position = UDim2.fromOffset(lx + dx, ly - rnd:NextInteger(20, 45)), BackgroundTransparency = 1, Size = UDim2.fromOffset(1, 1), Length = 0.5 },
+					function() p.AbsoluteObject:Destroy() end)
+			end
+		end
+
+		UserInputService.InputChanged:Connect(function(input)
+			if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+			if not (Library._particles and Library._particles.enabled) then return end
+			local now = os.clock()
+			if now - lastSpawn < 0.03 then return end
+			-- курсор внутри окна? (координаты как в drag-логике: Mouse.X/Y vs AbsolutePosition)
+			local ap, asz = core.AbsolutePosition, core.AbsoluteSize
+			if asz.X < 5 or asz.Y < 5 then return end -- окно свёрнуто
+			local mx, my = Mouse.X, Mouse.Y
+			if mx < ap.X or mx > ap.X + asz.X or my < ap.Y or my > ap.Y + asz.Y then return end
+			lastSpawn = now
+			local wsc = Library.WindowScale or 1
+			local lx = (mx - ap.X) / wsc
+			local ly = (my - ap.Y) / wsc
+			pcall(spawn, lx, ly)
+		end)
+	end
 
 	local tabButtons = core:object("ScrollingFrame", {
 		Size = UDim2.new(1, -40, 0, 25),
@@ -1353,7 +1497,7 @@ function Library:create(options)
 		end,
 	}
 
-	-- ===== Appearance (opacity / size / element size / layout) =====
+	-- ===== Appearance (opacity / particles / size / element size / layout) =====
 	settingsTab:slider{
 		Name = "Window Opacity",
 		Description = "How see-through the whole window is (100 = solid).",
@@ -1362,6 +1506,25 @@ function Library:create(options)
 		Default = 80,
 		Callback = function(value)
 			Library:setWindowOpacity(value)
+		end,
+	}
+
+	settingsTab:toggle{
+		Name = "Particles",
+		Description = "Spawn little particles that follow your cursor over the window.",
+		StartingState = false,
+		Callback = function(state)
+			Library:setParticlesEnabled(state)
+		end,
+	}
+
+	settingsTab:dropdown{
+		Name = "Particle Type",
+		StartingText = "Sparks",
+		Description = "Style of the cursor particles.",
+		Items = { "Sparks", "Neon Trail", "Bubbles", "Stars" },
+		Callback = function(kind)
+			Library:setParticleType(kind)
 		end,
 	}
 
@@ -1394,6 +1557,28 @@ function Library:create(options)
 		Items = { "Vertical (List)", "2 Columns", "3 Columns" },
 		Callback = function(mode)
 			Library:setLayoutMode(mode)
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Reset Appearance",
+		Description = "Reset opacity, size, element size, layout and particles to defaults.",
+		Callback = function()
+			-- сбрасываем через savable-set: обновляет и значение, и сам контрол в UI
+			local defaults = {
+				["Window Opacity"] = 80,
+				["Window Size"] = 100,
+				["Element Size"] = 100,
+				["Layout Mode"] = "Vertical (List)",
+				["Particles"] = false,
+				["Particle Type"] = "Sparks",
+			}
+			for _, s in ipairs(Library._savable) do
+				if defaults[s.key] ~= nil then
+					pcall(s.set, defaults[s.key])
+				end
+			end
+			mt:notification{ Title = "Appearance", Text = "Reset to defaults", Duration = 3 }
 		end,
 	}
 
@@ -1989,8 +2174,9 @@ function Library:toggle(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = toggleContainer:object("TextLabel", {
+		description = toggleContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -2000,6 +2186,7 @@ function Library:toggle(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	Library:_adaptRow(self, { container = toggleContainer, name = text, desc = description, pad = 55, top = 27, base = 52 })
 
 	local function toggle()
 		toggled = not toggled
@@ -2089,6 +2276,10 @@ function Library:dropdown(options)
 	-- Дропдаун сам меняет свой размер при раскрытии/сворачивании. Чтобы это не
 	-- сбрасывало ширину, заданную режимом отображения (колонки), берём текущую
 	-- целевую ширину из атрибутов компонента (_wScale/_wOff), а не хардкод 1,-20.
+	-- базовая (свёрнутая) высота строки дропдауна; растёт, если описание переносится
+	local function baseH()
+		return dropdownContainer.AbsoluteObject:GetAttribute("_rowBase") or 52
+	end
 	local function dw(h)
 		local ws, wo = Library:_compWidth(dropdownContainer.AbsoluteObject)
 		return UDim2.new(ws, wo, 0, h)
@@ -2104,8 +2295,9 @@ function Library:dropdown(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = dropdownContainer:object("TextLabel", {
+		description = dropdownContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -2115,6 +2307,8 @@ function Library:dropdown(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	-- имя дропдауна не трогаем (рядом с ним справа текущий выбор), переносим только описание
+	Library:_adaptRow(self, { container = dropdownContainer, desc = description, pad = 55, top = 27, base = 52 })
 
 	local icon = dropdownContainer:object("ImageLabel", {
 		AnchorPoint = Vector2.new(1, 0),
@@ -2143,6 +2337,13 @@ function Library:dropdown(options)
 		Size = UDim2.new(1, -10, 0, 0),
 		ClipsDescendants = true
 	})
+
+	-- если описание перенеслось и строка выросла — сдвигаем список пунктов вниз под неё
+	pcall(function()
+		dropdownContainer.AbsoluteObject:GetAttributeChangedSignal("_rowBase"):Connect(function()
+			itemContainer.Position = UDim2.new(0, 5, 0, baseH() + 3)
+		end)
+	end)
 
 	selectedText.Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20)
 
@@ -2270,13 +2471,13 @@ function Library:dropdown(options)
 			open = not open
 			if open then
 				itemContainer:tween{Size = UDim2.new(1, -10, 0, newSize)}
-				dropdownContainer:tween({Size = dw(52 + newSize)}, function()
+				dropdownContainer:tween({Size = dw(baseH() + newSize)}, function()
 					self:_resize_tab()
 				end)
 				icon:tween{Rotation = 180, Position = UDim2.new(1, -11, 0, 15)}
 			else
 				itemContainer:tween{Size = UDim2.new(1, -10, 0, 0)}
-				dropdownContainer:tween({Size = dw(52)}, function()
+				dropdownContainer:tween({Size = dw(baseH())}, function()
 					self:_resize_tab()
 				end)
 				icon:tween{Rotation = 0, Position = UDim2.new(1, -11, 0, 12)}
@@ -2328,7 +2529,7 @@ function Library:dropdown(options)
 					table.remove(items, _2)
 					newSize = (25 * #items) + 5
 					itemContainer:tween{Size = (not open and UDim2.new(1, -10, 0, 0)) or UDim2.new(1, -10, 0, newSize)}
-					dropdownContainer:tween({Size = (not open and dw(52)) or dw(52 + newSize)})
+					dropdownContainer:tween({Size = (not open and dw(baseH())) or dw(baseH() + newSize)})
 				end
 			end
 		end
@@ -2337,7 +2538,7 @@ function Library:dropdown(options)
 	function methods:Clear()
 		table.clear(items)
 		itemContainer:tween{Size = UDim2.new(1, -10, 0, 0)}
-		dropdownContainer:tween({Size = dw(52)}, function()
+		dropdownContainer:tween({Size = dw(baseH())}, function()
 			for i, v in next, itemContainer.AbsoluteObject:GetChildren() do
 				if v.ClassName == "TextButton" then
 					v:Destroy()
@@ -2358,7 +2559,7 @@ function Library:dropdown(options)
 
 		newSize = (25 * #items) + 5
 		itemContainer:tween{Size = (not open and UDim2.new(1, -10, 0, 0)) or UDim2.new(1, -10, 0, newSize)}
-		dropdownContainer:tween({Size = (not open and dw(52)) or dw(52 + newSize)})
+		dropdownContainer:tween({Size = (not open and dw(baseH())) or dw(baseH() + newSize)})
 
 		for i, item in next, items do
 			local label = item[1]
@@ -2554,8 +2755,9 @@ function Library:button(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = buttonContainer:object("TextLabel", {
+		description = buttonContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -2565,6 +2767,7 @@ function Library:button(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	Library:_adaptRow(self, { container = buttonContainer, name = text, desc = description, pad = 55, top = 27, base = 52 })
 
 	local icon = buttonContainer:object("ImageLabel", {
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -2645,8 +2848,9 @@ function Library:color_picker(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = buttonContainer:object("TextLabel", {
+		description = buttonContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -2656,6 +2860,7 @@ function Library:color_picker(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	Library:_adaptRow(self, { container = buttonContainer, name = text, desc = description, pad = 55, top = 27, base = 52 })
 
 	local icon = buttonContainer:object("ImageLabel", {
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -3676,6 +3881,10 @@ function Library:_theme_selector()
 		Size = UDim2.new(1, -20, 0, 127)
 	}):round(7)
 
+	-- у выбора темы своя внутренняя сетка (UIGridLayout) фиксированного размера —
+	-- не даём режиму колонок сжимать его ширину, иначе превью тем уезжают за край
+	themeContainer.AbsoluteObject:SetAttribute("_noskin", true)
+
 	local text = themeContainer:object("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.fromOffset(10, 5),
@@ -3803,8 +4012,9 @@ function Library:keybind(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = keybindContainer:object("TextLabel", {
+		description = keybindContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -3814,6 +4024,7 @@ function Library:keybind(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	Library:_adaptRow(self, { container = keybindContainer, name = text, desc = description, pad = 100, top = 27, base = 52 })
 
 
 	local keybindDisplay = keybindContainer:object("TextLabel", {
@@ -4087,8 +4298,9 @@ function Library:slider(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = sliderContainer:object("TextLabel", {
+		description = sliderContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -4099,6 +4311,8 @@ function Library:slider(options)
 		})
 		sliderContainer.Size = UDim2.new(1, -20, 0, 76)
 	end
+	-- у слайдера снизу полоса прокрутки -> резервируем больше места снизу (bottom = 28)
+	Library:_adaptRow(self, { container = sliderContainer, name = text, desc = description, pad = 80, top = 27, base = 76, bottom = 28 })
 
 	local valueText = sliderContainer:object("TextLabel", {
 		AnchorPoint = Vector2.new(1, 0),
@@ -4223,8 +4437,9 @@ function Library:textbox(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = textboxContainer:object("TextLabel", {
+		description = textboxContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -4234,6 +4449,7 @@ function Library:textbox(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	Library:_adaptRow(self, { container = textboxContainer, name = text, desc = description, pad = 100, top = 27, base = 52 })
 
 
 	local textBox = textboxContainer:object("TextBox", {
