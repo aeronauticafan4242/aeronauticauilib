@@ -475,12 +475,26 @@ Library._savable = {}
 Library._pendingSettings = nil -- настройки, ожидающие компонентов (при загрузке до их создания)
 Library._saveAll = false       -- "Save all settings": сохранять состояния всех функций скрипта, не только меню
 
+-- ===== Appearance state (opacity / window scale / element scale / layout mode) =====
+-- Все значения по умолчанию воспроизводят ТЕКУЩИЙ вид 1-в-1 (scale = 1, ширина без изменений),
+-- поэтому включение этих фич не ломает существующие скрипты.
+Library._skinComponents = {}   -- список Instance'ов внешних фреймов компонентов (для ре-стайла)
+Library._skinTabs = {}         -- { {container = <ScrollingFrame>, layout = <UIListLayout>}, ... }
+Library.WindowScale  = 1       -- общий масштаб окна (UIScale на core)
+Library.ElementScale = 1       -- масштаб отдельных элементов (UIScale на каждом компоненте)
+Library.LayoutCols   = 1       -- 1 = вертикальный список, 2/3 = колонки
+Library.WindowOpacity = 0.8    -- 1 = непрозрачно; по умолчанию слегка прозрачное окно
+
 -- Эти настройки меню сохраняются ВСЕГДА (даже если "Save all settings" выключен)
 local ALWAYS_SAVE = {
 	["Toggle Key"] = true,
 	["Lock Dragging"] = true,
 	["UI Drag Speed"] = true,
-	["Save all settings"] = true
+	["Save all settings"] = true,
+	["Window Opacity"] = true,
+	["Window Size"] = true,
+	["Element Size"] = true,
+	["Layout Mode"] = true
 }
 
 function Library:_registerSavable(key, kind, getFn, setFn)
@@ -600,6 +614,147 @@ function Library:getAutoload()
 		if ok and v and v ~= "" then return v end
 	end
 	return nil
+end
+
+-- =====================================================================
+--  Appearance engine: opacity / window scale / element scale / layout
+--  Спроектировано так, чтобы фичи НЕ конфликтовали между собой:
+--   * opacity   -> только core.BackgroundTransparency
+--   * window    -> UIScale на core (масштабирует всё окно целиком)
+--   * element   -> UIScale на каждом компоненте (не трогает ширину)
+--   * layout    -> FillDirection/Wraps слоя + ширина компонентов
+--  Значения по умолчанию (scale=1, cols=1) дают тот же вид, что и раньше.
+-- =====================================================================
+
+-- Текущая целевая ширина внешнего фрейма компонента (scale, offset).
+-- Дропдаун сам меняет свой размер при раскрытии, поэтому он читает эти
+-- атрибуты, чтобы не сбрасывать колоночную ширину обратно на всю строку.
+function Library:_compWidth(inst)
+	local ws = inst and inst:GetAttribute("_wScale")
+	local wo = inst and inst:GetAttribute("_wOff")
+	if ws == nil then ws = 1 end
+	if wo == nil then wo = -20 end
+	return ws, wo
+end
+
+-- Применить текущие layout+element настройки к ОДНОМУ компоненту.
+function Library:_styleComponent(inst)
+	if not inst then return end
+	-- запоминаем исходный offset ширины ОДИН раз (у section он -24, у прочих -20)
+	local baseWOff = inst:GetAttribute("_baseWOff")
+	if baseWOff == nil then baseWOff = inst.Size.X.Offset; inst:SetAttribute("_baseWOff", baseWOff) end
+
+	local es   = Library.ElementScale or 1
+	local cols = Library.LayoutCols or 1
+	local wScale, wOff
+	if cols <= 1 then
+		-- вертикальный список: полная ширина строки (как было), делим на es чтобы
+		-- UIScale не «съедал» ширину (в списке элемент должен занимать всю строку).
+		wScale, wOff = 1 / es, baseWOff / es
+	else
+		-- N колонок: доля 1/cols, небольшой боковой отступ. Делим на es —
+		-- после умножения UIScale итоговая ширина колонки будет ровно 1/cols.
+		wScale, wOff = (1 / cols) / es, -12 / es
+	end
+	inst:SetAttribute("_wScale", wScale)
+	inst:SetAttribute("_wOff", wOff)
+	-- меняем ТОЛЬКО ширину, высоту оставляем как есть (её масштабирует UIScale)
+	inst.Size = UDim2.new(wScale, wOff, inst.Size.Y.Scale, inst.Size.Y.Offset)
+
+	local sc = inst:FindFirstChild("_uiScale")
+	if not sc then
+		sc = Instance.new("UIScale")
+		sc.Name = "_uiScale"
+		sc.Parent = inst
+	end
+	sc.Scale = es
+end
+
+-- Настроить UIListLayout вкладки под выбранный режим отображения.
+function Library:_styleLayout(layoutInst)
+	if not layoutInst then return end
+	local cols = Library.LayoutCols or 1
+	if cols <= 1 then
+		layoutInst.FillDirection = Enum.FillDirection.Vertical
+		pcall(function() layoutInst.Wraps = false end)
+		layoutInst.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		layoutInst.Padding = UDim.new(0, 10)
+	else
+		layoutInst.FillDirection = Enum.FillDirection.Horizontal
+		pcall(function() layoutInst.Wraps = true end)
+		layoutInst.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		layoutInst.Padding = UDim.new(0, 8)
+	end
+end
+
+-- Зарегистрировать (один раз) все новые компоненты вкладки и применить стиль.
+function Library:_skinChildren(parentInst)
+	if not parentInst then return end
+	for _, ch in ipairs(parentInst:GetChildren()) do
+		if ch:IsA("GuiObject") and not ch:GetAttribute("_skinned") then
+			ch:SetAttribute("_skinned", true)
+			Library._skinComponents[#Library._skinComponents + 1] = ch
+			pcall(function() Library:_styleComponent(ch) end)
+		end
+	end
+end
+
+-- Пересчитать CanvasSize всех вкладок (учитывая масштаб окна).
+function Library:_reflowCanvas()
+	local ws = Library.WindowScale or 1
+	task.defer(function()
+		for _, t in ipairs(Library._skinTabs) do
+			pcall(function()
+				t.container.CanvasSize = UDim2.fromOffset(0, t.layout.AbsoluteContentSize.Y / ws + 20)
+			end)
+		end
+	end)
+end
+
+-- ---- Публичные сеттеры (используются слайдерами/дропдауном в Settings и загрузкой конфига) ----
+
+function Library:setWindowOpacity(pct)
+	local a = math.clamp((tonumber(pct) or 100) / 100, 0, 1) -- 1 = непрозрачно
+	Library.WindowOpacity = a
+	if Library.mainFrame then
+		pcall(function() Library.mainFrame.BackgroundTransparency = 1 - a end)
+	end
+end
+
+function Library:setWindowScale(pct)
+	local s = math.clamp((tonumber(pct) or 100) / 100, 0.5, 1.3)
+	Library.WindowScale = s
+	if Library._windowScaleObj then
+		Library._windowScaleObj.Scale = s
+	end
+	Library:_reflowCanvas()
+end
+
+function Library:setElementScale(pct)
+	local s = math.clamp((tonumber(pct) or 100) / 100, 0.7, 1.4)
+	Library.ElementScale = s
+	for _, inst in ipairs(Library._skinComponents) do
+		pcall(function() Library:_styleComponent(inst) end)
+	end
+	Library:_reflowCanvas()
+end
+
+function Library:setLayoutMode(mode)
+	local cols = 1
+	if mode == "2 Columns" then
+		cols = 2
+	elseif mode == "3 Columns" then
+		cols = 3
+	end
+	Library.LayoutCols = cols
+	Library.LayoutMode = mode
+	for _, t in ipairs(Library._skinTabs) do
+		pcall(function() Library:_styleLayout(t.layout) end)
+	end
+	for _, inst in ipairs(Library._skinComponents) do
+		pcall(function() Library:_styleComponent(inst) end)
+	end
+	Library:_reflowCanvas()
 end
 
 --[[ old lighten/darken functions, may revert if contrast gets fucked up
@@ -755,6 +910,16 @@ function Library:create(options)
 	rawset(core, "oldSize", options.Size)
 
 	self.mainFrame = core
+
+	-- ===== Appearance hooks =====
+	-- окно слегка прозрачное по умолчанию (fade() использует отдельный оверлей,
+	-- поэтому BackgroundTransparency самого core свободен под настройку opacity)
+	pcall(function() core.BackgroundTransparency = 1 - (Library.WindowOpacity or 0.85) end)
+	-- UIScale для настройки размера окна (масштабирует всё окно целиком)
+	Library._windowScaleObj = Instance.new("UIScale")
+	Library._windowScaleObj.Name = "_windowScale"
+	Library._windowScaleObj.Scale = Library.WindowScale or 1
+	Library._windowScaleObj.Parent = core.AbsoluteObject
 
 	local tabButtons = core:object("ScrollingFrame", {
 		Size = UDim2.new(1, -40, 0, 25),
@@ -1188,6 +1353,50 @@ function Library:create(options)
 		end,
 	}
 
+	-- ===== Appearance (opacity / size / element size / layout) =====
+	settingsTab:slider{
+		Name = "Window Opacity",
+		Description = "How see-through the whole window is (100 = solid).",
+		Min = 20,
+		Max = 100,
+		Default = 80,
+		Callback = function(value)
+			Library:setWindowOpacity(value)
+		end,
+	}
+
+	settingsTab:slider{
+		Name = "Window Size",
+		Description = "Overall UI scale — shrink it for laptops / small screens.",
+		Min = 60,
+		Max = 115,
+		Default = 100,
+		Callback = function(value)
+			Library:setWindowScale(value)
+		end,
+	}
+
+	settingsTab:slider{
+		Name = "Element Size",
+		Description = "Size of buttons, sliders, dropdowns and every element.",
+		Min = 80,
+		Max = 130,
+		Default = 100,
+		Callback = function(value)
+			Library:setElementScale(value)
+		end,
+	}
+
+	settingsTab:dropdown{
+		Name = "Layout Mode",
+		StartingText = "Vertical (List)",
+		Description = "How elements are arranged inside each tab.",
+		Items = { "Vertical (List)", "2 Columns", "3 Columns" },
+		Callback = function(mode)
+			Library:setLayoutMode(mode)
+		end,
+	}
+
 	settingsTab:toggle{
 		Name = "Save all settings",
 		Description = "Also save every script feature's state to configs (not just the menu). Off by default.",
@@ -1547,6 +1756,11 @@ function Library:tab(options)
 		PaddingTop = UDim.new(0, 10)
 	})
 
+	-- регистрируем вкладку для ре-стайла (layout mode / масштаб) и сразу
+	-- приводим её слой к текущему выбранному режиму отображения
+	Library._skinTabs[#Library._skinTabs + 1] = { container = tab.AbsoluteObject, layout = layout.AbsoluteObject }
+	pcall(function() Library:_styleLayout(layout.AbsoluteObject) end)
+
 	local tabButton = Library:object("TextButton", {
 		BackgroundTransparency = 1,
 		Parent = self.nilFolder.AbsoluteObject,
@@ -1714,11 +1928,15 @@ function Library:tab(options)
 end
 
 function Library:_resize_tab()
+	local ws = Library.WindowScale or 1
 	if self.container.ClassName == "ScrollingFrame" then
-		self.container.CanvasSize = UDim2.fromOffset(0, self.layout.AbsoluteContentSize.Y + 20)
+		-- зарегистрировать/оформить любые только что добавленные компоненты
+		pcall(function() Library:_skinChildren(self.container.AbsoluteObject) end)
+		-- AbsoluteContentSize приходит уже с учётом UIScale окна -> делим обратно в локальные координаты
+		self.container.CanvasSize = UDim2.fromOffset(0, self.layout.AbsoluteContentSize.Y / ws + 20)
 	else
-		self.sectionContainer.Size = UDim2.new(1, -24, 0, self.layout.AbsoluteContentSize.Y + 20)
-		self.parentContainer.CanvasSize = UDim2.fromOffset(0, self.parentLayout.AbsoluteContentSize.Y + 20)
+		self.sectionContainer.Size = UDim2.new(1, -24, 0, self.layout.AbsoluteContentSize.Y / ws + 20)
+		self.parentContainer.CanvasSize = UDim2.fromOffset(0, self.parentLayout.AbsoluteContentSize.Y / ws + 20)
 	end
 end
 
@@ -1867,6 +2085,14 @@ function Library:dropdown(options)
 		Neon = true,
 		Size = UDim2.new(1, -20, 0, 52)
 	}):round(8)
+
+	-- Дропдаун сам меняет свой размер при раскрытии/сворачивании. Чтобы это не
+	-- сбрасывало ширину, заданную режимом отображения (колонки), берём текущую
+	-- целевую ширину из атрибутов компонента (_wScale/_wOff), а не хардкод 1,-20.
+	local function dw(h)
+		local ws, wo = Library:_compWidth(dropdownContainer.AbsoluteObject)
+		return UDim2.new(ws, wo, 0, h)
+	end
 
 	local text = dropdownContainer:object("TextLabel", {
 		BackgroundTransparency = 1,
@@ -2044,13 +2270,13 @@ function Library:dropdown(options)
 			open = not open
 			if open then
 				itemContainer:tween{Size = UDim2.new(1, -10, 0, newSize)}
-				dropdownContainer:tween({Size = UDim2.new(1, -20, 0, 52 + newSize)}, function()
+				dropdownContainer:tween({Size = dw(52 + newSize)}, function()
 					self:_resize_tab()
 				end)
 				icon:tween{Rotation = 180, Position = UDim2.new(1, -11, 0, 15)}
 			else
 				itemContainer:tween{Size = UDim2.new(1, -10, 0, 0)}
-				dropdownContainer:tween({Size = UDim2.new(1, -20, 0, 52)}, function()
+				dropdownContainer:tween({Size = dw(52)}, function()
 					self:_resize_tab()
 				end)
 				icon:tween{Rotation = 0, Position = UDim2.new(1, -11, 0, 12)}
@@ -2102,7 +2328,7 @@ function Library:dropdown(options)
 					table.remove(items, _2)
 					newSize = (25 * #items) + 5
 					itemContainer:tween{Size = (not open and UDim2.new(1, -10, 0, 0)) or UDim2.new(1, -10, 0, newSize)}
-					dropdownContainer:tween({Size = (not open and UDim2.new(1, -20, 0, 52)) or UDim2.new(1, -20, 0, 52 + newSize)})
+					dropdownContainer:tween({Size = (not open and dw(52)) or dw(52 + newSize)})
 				end
 			end
 		end
@@ -2111,7 +2337,7 @@ function Library:dropdown(options)
 	function methods:Clear()
 		table.clear(items)
 		itemContainer:tween{Size = UDim2.new(1, -10, 0, 0)}
-		dropdownContainer:tween({Size = UDim2.new(1, -20, 0, 52)}, function()
+		dropdownContainer:tween({Size = dw(52)}, function()
 			for i, v in next, itemContainer.AbsoluteObject:GetChildren() do
 				if v.ClassName == "TextButton" then
 					v:Destroy()
@@ -2132,7 +2358,7 @@ function Library:dropdown(options)
 
 		newSize = (25 * #items) + 5
 		itemContainer:tween{Size = (not open and UDim2.new(1, -10, 0, 0)) or UDim2.new(1, -10, 0, newSize)}
-		dropdownContainer:tween({Size = (not open and UDim2.new(1, -20, 0, 52)) or UDim2.new(1, -20, 0, 52 + newSize)})
+		dropdownContainer:tween({Size = (not open and dw(52)) or dw(52 + newSize)})
 
 		for i, item in next, items do
 			local label = item[1]
