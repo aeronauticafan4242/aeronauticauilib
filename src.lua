@@ -832,47 +832,53 @@ end
 --  мягкий световой градиент, яркая «зеркальная» кромка и крупные
 --  скругления. Тогглы превращаются в iOS-пилюли. Переключается вживую.
 -- ===================================================================
-function Library:_applyGlassToComponent(inst, on)
+-- on = включить стекло; cornerRadius — переопределение скругления (напр. 26 для «Welcome»)
+function Library:_applyGlassToComponent(inst, on, cornerRadius)
 	if not inst then return end
+	cornerRadius = cornerRadius or 14
 	pcall(function()
 		local corner = inst:FindFirstChildOfClass("UICorner")
 		if on then
+			local v2 = (Library.Style == "Liquid Glass V2")
 			if corner then
 				if inst:GetAttribute("_lcorner") == nil then
 					inst:SetAttribute("_lcorner", corner.CornerRadius.Offset)
 				end
-				corner.CornerRadius = UDim.new(0, 14)
+				corner.CornerRadius = UDim.new(0, cornerRadius)
 			end
 			if inst:GetAttribute("_lbgT") == nil then
 				inst:SetAttribute("_lbgT", inst.BackgroundTransparency)
 			end
-			inst.BackgroundTransparency = 0.35
+			-- V2 «прозрачнее» (как clear-стекло айфона), но фон НЕ белим — иначе белый текст пропадёт
+			inst.BackgroundTransparency = v2 and 0.5 or 0.35
 			-- световой градиент фона (сверху светлее — эффект стекла)
-			if not inst:FindFirstChild("_glassSheen") then
-				local base = inst.BackgroundColor3
-				local g = Instance.new("UIGradient")
-				g.Name = "_glassSheen"
-				g.Rotation = 90
-				g.Color = ColorSequence.new(Library:lighten(base, 30), base)
-				g.Parent = inst
+			local base = inst.BackgroundColor3
+			local sheen = inst:FindFirstChild("_glassSheen")
+			if not sheen then
+				sheen = Instance.new("UIGradient")
+				sheen.Name = "_glassSheen"
+				sheen.Rotation = 90
+				sheen.Parent = inst
 			end
-			-- «зеркальная» кромка (ярче сверху)
-			if not inst:FindFirstChild("_glassRim") then
-				local s = Instance.new("UIStroke")
-				s.Name = "_glassRim"
-				s.Thickness = 1.5
-				s.Color = Color3.fromRGB(255, 255, 255)
-				s.Transparency = 0.35
-				s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			sheen.Color = ColorSequence.new(Library:lighten(base, v2 and 24 or 30), base)
+			-- «зеркальная» кромка (ярче сверху; в V2 — заметнее, белее)
+			local rim = inst:FindFirstChild("_glassRim")
+			if not rim then
+				rim = Instance.new("UIStroke")
+				rim.Name = "_glassRim"
+				rim.Color = Color3.fromRGB(255, 255, 255)
+				rim.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 				local sg = Instance.new("UIGradient")
 				sg.Rotation = 90
 				sg.Transparency = NumberSequence.new({
 					NumberSequenceKeypoint.new(0, 0.05),
 					NumberSequenceKeypoint.new(1, 0.85),
 				})
-				sg.Parent = s
-				s.Parent = inst
+				sg.Parent = rim
+				rim.Parent = inst
 			end
+			rim.Thickness = 1.5
+			rim.Transparency = v2 and 0.12 or 0.35
 		else
 			local lc = inst:GetAttribute("_lcorner")
 			if corner and lc then corner.CornerRadius = UDim.new(0, lc) end
@@ -905,15 +911,22 @@ function Library:_applyWindowGlass(on)
 end
 
 function Library:setUIStyle(name)
-	local glass = (name == "Liquid Glass")
-	Library.Style = glass and "Liquid Glass" or "Legacy"
+	if name ~= "Liquid Glass" and name ~= "Liquid Glass V2" then
+		name = "Legacy"
+	end
+	local glass = (name ~= "Legacy")
+	Library.Style = name
 	for _, inst in ipairs(Library._skinComponents) do
 		Library:_applyGlassToComponent(inst, glass)
 	end
 	for _, fn in ipairs(Library._styleHooks) do
-		pcall(fn, Library.Style)
+		pcall(fn, name)
 	end
 	Library:_applyWindowGlass(glass)
+	-- поверхность «Welcome, ник» — прозрачная и максимально скруглённая в стеклянных режимах
+	if Library._profileFrame then
+		Library:_applyGlassToComponent(Library._profileFrame, glass, 32)
+	end
 end
 
 --[[ old lighten/darken functions, may revert if contrast gets fucked up
@@ -1446,6 +1459,9 @@ function Library:create(options)
 		Size = UDim2.new(1, -20, 0, 100)
 	}):round(7)
 
+	-- «Welcome, ник» — регистрируем поверхность, чтобы Liquid Glass мог сделать её прозрачной/круглой
+	Library._profileFrame = profile.AbsoluteObject
+
 	local profilePictureContainer = profile:object("ImageLabel", {
 		Image = Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100),
 		Theme = {BackgroundColor3 = {"Secondary", 10}},
@@ -1598,8 +1614,8 @@ function Library:create(options)
 	settingsTab:dropdown{
 		Name = "UI Style",
 		StartingText = "Legacy",
-		Description = "Legacy = classic look. Liquid Glass = iOS-style frosted glass UI.",
-		Items = { "Legacy", "Liquid Glass" },
+		Description = "Legacy = classic. Liquid Glass = iOS frosted glass. Liquid Glass V2 = clear iPhone glass (white see-through toggles).",
+		Items = { "Legacy", "Liquid Glass", "Liquid Glass V2" },
 		Callback = function(style)
 			Library:setUIStyle(style)
 		end,
@@ -2304,6 +2320,8 @@ function Library:toggle(options)
 		BackgroundColor3 = Color3.fromRGB(120, 120, 128),
 		Visible = false
 	}):round(100)
+	-- морозная кромка пилюли (видна только в V2 — прозрачное «clear»-стекло айфона)
+	local pillRim = pillTrack:object("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Transparency = 1, Thickness = 1 })
 	local pillKnob = pillTrack:object("Frame", {
 		AnchorPoint = Vector2.new(0, 0.5),
 		Position = UDim2.new(0, 3, 0.5, 0),
@@ -2313,23 +2331,35 @@ function Library:toggle(options)
 	pillKnob:object("UIStroke", { Color = Color3.fromRGB(0, 0, 0), Transparency = 0.9, Thickness = 1 })
 
 	local function updatePill(state, animate)
-		local trackCol = state and Color3.fromRGB(52, 199, 89) or Color3.fromRGB(120, 120, 128)
+		local v2 = (Library.Style == "Liquid Glass V2")
+		local trackCol, trackT
+		if v2 then
+			-- прозрачный белый переключатель как в iOS Liquid Glass (не зелёный)
+			trackCol = Color3.fromRGB(255, 255, 255)
+			trackT = state and 0.35 or 0.62
+		else
+			trackCol = state and Color3.fromRGB(52, 199, 89) or Color3.fromRGB(120, 120, 128)
+			trackT = 0
+		end
 		local knobPos = state and UDim2.new(0, 21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
 		if animate then
-			pillTrack:tween{ BackgroundColor3 = trackCol, Length = 0.15 }
+			pillTrack:tween{ BackgroundColor3 = trackCol, BackgroundTransparency = trackT, Length = 0.15 }
 			pillKnob:tween{ Position = knobPos, Length = 0.15 }
 		else
 			pillTrack.BackgroundColor3 = trackCol
+			pillTrack.BackgroundTransparency = trackT
 			pillKnob.Position = knobPos
 		end
 	end
 
 	-- реакция на смену стиля: iOS-пилюля <-> иконки
 	local function applyStyle(style)
-		local glass = (style == "Liquid Glass")
+		local glass = (style ~= "Legacy")
+		local v2 = (style == "Liquid Glass V2")
 		onIcon.Visible = not glass
 		offIcon.Visible = not glass
 		pillTrack.Visible = glass
+		pillRim.Transparency = v2 and 0.1 or 1  -- морозная кромка только в V2
 		updatePill(toggled, false)
 	end
 	Library._styleHooks[#Library._styleHooks + 1] = applyStyle
