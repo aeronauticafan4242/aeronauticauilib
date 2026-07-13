@@ -484,6 +484,8 @@ Library.WindowScale  = 1       -- общий масштаб окна (UIScale н
 Library.ElementScale = 1       -- масштаб отдельных элементов (UIScale на каждом компоненте)
 Library.LayoutCols   = 1       -- 1 = вертикальный список, 2/3 = колонки
 Library.WindowOpacity = 0.8    -- 1 = непрозрачно; по умолчанию слегка прозрачное окно
+Library.Style        = "Legacy" -- "Legacy" | "Liquid Glass" (iOS-стекло)
+Library._styleHooks  = {}      -- функции компонентов, которым нужна структурная смена (тогглы-пилюли)
 
 -- Эти настройки меню сохраняются ВСЕГДА (даже если "Save all settings" выключен)
 local ALWAYS_SAVE = {
@@ -496,7 +498,8 @@ local ALWAYS_SAVE = {
 	["Element Size"] = true,
 	["Layout Mode"] = true,
 	["Particles"] = true,
-	["Particle Type"] = true
+	["Particle Type"] = true,
+	["UI Style"] = true
 }
 
 function Library:_registerSavable(key, kind, getFn, setFn)
@@ -699,6 +702,10 @@ function Library:_skinChildren(parentInst)
 			ch:SetAttribute("_skinned", true)
 			Library._skinComponents[#Library._skinComponents + 1] = ch
 			pcall(function() Library:_styleComponent(ch) end)
+			-- если активен Liquid Glass — сразу «остекляем» новый компонент
+			if Library.Style == "Liquid Glass" then
+				Library:_applyGlassToComponent(ch, true)
+			end
 		end
 	end
 end
@@ -817,6 +824,96 @@ function Library:setParticleType(kind)
 	if kind and kind ~= "" then
 		Library._particles.kind = kind
 	end
+end
+
+-- ===================================================================
+--  Liquid Glass — «стеклянный» стиль в духе iOS 26.
+--  Работает поверх Legacy как обратимый скин: полупрозрачный фон,
+--  мягкий световой градиент, яркая «зеркальная» кромка и крупные
+--  скругления. Тогглы превращаются в iOS-пилюли. Переключается вживую.
+-- ===================================================================
+function Library:_applyGlassToComponent(inst, on)
+	if not inst then return end
+	pcall(function()
+		local corner = inst:FindFirstChildOfClass("UICorner")
+		if on then
+			if corner then
+				if inst:GetAttribute("_lcorner") == nil then
+					inst:SetAttribute("_lcorner", corner.CornerRadius.Offset)
+				end
+				corner.CornerRadius = UDim.new(0, 14)
+			end
+			if inst:GetAttribute("_lbgT") == nil then
+				inst:SetAttribute("_lbgT", inst.BackgroundTransparency)
+			end
+			inst.BackgroundTransparency = 0.35
+			-- световой градиент фона (сверху светлее — эффект стекла)
+			if not inst:FindFirstChild("_glassSheen") then
+				local base = inst.BackgroundColor3
+				local g = Instance.new("UIGradient")
+				g.Name = "_glassSheen"
+				g.Rotation = 90
+				g.Color = ColorSequence.new(Library:lighten(base, 30), base)
+				g.Parent = inst
+			end
+			-- «зеркальная» кромка (ярче сверху)
+			if not inst:FindFirstChild("_glassRim") then
+				local s = Instance.new("UIStroke")
+				s.Name = "_glassRim"
+				s.Thickness = 1.5
+				s.Color = Color3.fromRGB(255, 255, 255)
+				s.Transparency = 0.35
+				s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+				local sg = Instance.new("UIGradient")
+				sg.Rotation = 90
+				sg.Transparency = NumberSequence.new({
+					NumberSequenceKeypoint.new(0, 0.05),
+					NumberSequenceKeypoint.new(1, 0.85),
+				})
+				sg.Parent = s
+				s.Parent = inst
+			end
+		else
+			local lc = inst:GetAttribute("_lcorner")
+			if corner and lc then corner.CornerRadius = UDim.new(0, lc) end
+			local lb = inst:GetAttribute("_lbgT")
+			if lb ~= nil then inst.BackgroundTransparency = lb end
+			local a = inst:FindFirstChild("_glassSheen"); if a then a:Destroy() end
+			local b = inst:FindFirstChild("_glassRim"); if b then b:Destroy() end
+		end
+	end)
+end
+
+function Library:_applyWindowGlass(on)
+	local core = Library.mainFrame
+	if not core then return end
+	local raw = core.AbsoluteObject or core
+	pcall(function()
+		if on then
+			if not raw:FindFirstChild("_glassSheen") then
+				local base = raw.BackgroundColor3
+				local g = Instance.new("UIGradient")
+				g.Name = "_glassSheen"
+				g.Rotation = 90
+				g.Color = ColorSequence.new(Library:lighten(base, 16), base)
+				g.Parent = raw
+			end
+		else
+			local s = raw:FindFirstChild("_glassSheen"); if s then s:Destroy() end
+		end
+	end)
+end
+
+function Library:setUIStyle(name)
+	local glass = (name == "Liquid Glass")
+	Library.Style = glass and "Liquid Glass" or "Legacy"
+	for _, inst in ipairs(Library._skinComponents) do
+		Library:_applyGlassToComponent(inst, glass)
+	end
+	for _, fn in ipairs(Library._styleHooks) do
+		pcall(fn, Library.Style)
+	end
+	Library:_applyWindowGlass(glass)
 end
 
 --[[ old lighten/darken functions, may revert if contrast gets fucked up
@@ -1497,7 +1594,17 @@ function Library:create(options)
 		end,
 	}
 
-	-- ===== Appearance (opacity / particles / size / element size / layout) =====
+	-- ===== Appearance (style / opacity / particles / size / element size / layout) =====
+	settingsTab:dropdown{
+		Name = "UI Style",
+		StartingText = "Legacy",
+		Description = "Legacy = classic look. Liquid Glass = iOS-style frosted glass UI.",
+		Items = { "Legacy", "Liquid Glass" },
+		Callback = function(style)
+			Library:setUIStyle(style)
+		end,
+	}
+
 	settingsTab:slider{
 		Name = "Window Opacity",
 		Description = "How see-through the whole window is (100 = solid).",
@@ -1566,6 +1673,7 @@ function Library:create(options)
 		Callback = function()
 			-- сбрасываем через savable-set: обновляет и значение, и сам контрол в UI
 			local defaults = {
+				["UI Style"] = "Legacy",
 				["Window Opacity"] = 80,
 				["Window Size"] = 100,
 				["Element Size"] = 100,
@@ -2186,7 +2294,46 @@ function Library:toggle(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
-	Library:_adaptRow(self, { container = toggleContainer, name = text, desc = description, pad = 55, top = 27, base = 52 })
+	Library:_adaptRow(self, { container = toggleContainer, name = text, desc = description, pad = 66, top = 27, base = 52 })
+
+	-- iOS-пилюля для Liquid Glass (по умолчанию скрыта; в Legacy показаны иконки)
+	local pillTrack = toggleContainer:object("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -11, 0.5, 0),
+		Size = UDim2.fromOffset(46, 28),
+		BackgroundColor3 = Color3.fromRGB(120, 120, 128),
+		Visible = false
+	}):round(100)
+	local pillKnob = pillTrack:object("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 3, 0.5, 0),
+		Size = UDim2.fromOffset(22, 22),
+		BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	}):round(100)
+	pillKnob:object("UIStroke", { Color = Color3.fromRGB(0, 0, 0), Transparency = 0.9, Thickness = 1 })
+
+	local function updatePill(state, animate)
+		local trackCol = state and Color3.fromRGB(52, 199, 89) or Color3.fromRGB(120, 120, 128)
+		local knobPos = state and UDim2.new(0, 21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+		if animate then
+			pillTrack:tween{ BackgroundColor3 = trackCol, Length = 0.15 }
+			pillKnob:tween{ Position = knobPos, Length = 0.15 }
+		else
+			pillTrack.BackgroundColor3 = trackCol
+			pillKnob.Position = knobPos
+		end
+	end
+
+	-- реакция на смену стиля: iOS-пилюля <-> иконки
+	local function applyStyle(style)
+		local glass = (style == "Liquid Glass")
+		onIcon.Visible = not glass
+		offIcon.Visible = not glass
+		pillTrack.Visible = glass
+		updatePill(toggled, false)
+	end
+	Library._styleHooks[#Library._styleHooks + 1] = applyStyle
+	applyStyle(Library.Style)
 
 	local function toggle()
 		toggled = not toggled
@@ -2195,6 +2342,7 @@ function Library:toggle(options)
 		else
 			onIcon:crossfade(offIcon, 0.1)
 		end
+		updatePill(toggled, true)
 		options.Callback(toggled)
 	end
 
@@ -2243,6 +2391,7 @@ function Library:toggle(options)
 		else
 			onIcon:crossfade(offIcon, 0.1)
 		end
+		updatePill(toggled, true)
 		task.spawn(function() options.Callback(toggled) end)
 	end
 
