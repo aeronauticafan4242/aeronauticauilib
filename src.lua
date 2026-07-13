@@ -2021,6 +2021,180 @@ function Library:notification(options)
 	end)
 end
 
+-- ===================================================================
+--  Feedback-уведомление (обратная связь): заголовок + текст + кнопки.
+--  Отличается от обычного :notification наличием кнопок с колбэками.
+--   * до 12 кнопок; текст переносится и НЕ перекрывает кнопки;
+--     уведомление растягивается по высоте, чтобы кнопки влезли рядами;
+--   * каждая кнопка: { Text = "...", Confirm = 0, Callback = function() end }
+--     Confirm = сколько ДОПОЛНИТЕЛЬНЫХ нажатий нужно для подтверждения
+--     (0 = действие выполняется сразу; >0 = требуется повторное подтверждение).
+--  Обычный :notification НЕ трогаем — это отдельный тип.
+-- ===================================================================
+function Library:feedback(options)
+	options = self:set_defaults({
+		Title = "Confirm",
+		Text = "Are you sure?",
+		Duration = 0,        -- 0 = висит, пока не нажмут кнопку
+		Width = 320,
+		Buttons = {},
+		Callback = function() end,   -- вызывается при закрытии уведомления
+	}, options)
+
+	local TextService = game:GetService("TextService")
+	local width = math.clamp(options.Width or 320, 280, 460)
+	local innerW = width - 22
+
+	-- нормализуем список кнопок (не больше 12)
+	local btns = {}
+	for _, b in ipairs(options.Buttons) do
+		if #btns >= 12 then break end
+		btns[#btns + 1] = {
+			Text = tostring(b.Text or "OK"),
+			Confirm = tonumber(b.Confirm) or 0,
+			Callback = b.Callback or function() end,
+		}
+	end
+	if #btns == 0 then
+		btns[1] = { Text = "OK", Confirm = 0, Callback = function() end }
+	end
+
+	-- геометрия: текст сверху (авто-высота), кнопки рядами снизу
+	local textH = TextService:GetTextSize(options.Text, 16, Enum.Font.SourceSans, Vector2.new(innerW, 100000)).Y
+	local btnW, btnH, gap = 96, 30, 8
+	local perRow = math.max(1, math.floor((innerW + gap) / (btnW + gap)))
+	local rows = math.ceil(#btns / perRow)
+	local btnsH = rows * btnH + (rows - 1) * gap
+	local frameH = 23 + textH + 12 + btnsH + 22
+
+	local noti = self.notifs:object("Frame", {
+		BackgroundTransparency = 1,
+		Theme = { BackgroundColor3 = "Main" },
+		Size = UDim2.new(0, width, 0, 0)
+	}):round(10)
+
+	noti:object("UIPadding", {
+		PaddingBottom = UDim.new(0, 11), PaddingTop = UDim.new(0, 11),
+		PaddingLeft = UDim.new(0, 11), PaddingRight = UDim.new(0, 11)
+	})
+
+	local dropShadow = noti:object("Frame", { ZIndex = 0, BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1) })
+	local _shadow = dropShadow:object("ImageLabel", {
+		Centered = true, Position = UDim2.fromScale(.5, .5), BackgroundTransparency = 1,
+		Size = UDim2.new(1, 70, 1, 70), ZIndex = 0, Image = "rbxassetid://6014261993",
+		ImageColor3 = Color3.fromRGB(0, 0, 0), ImageTransparency = 1,
+		ScaleType = Enum.ScaleType.Slice, SliceCenter = Rect.new(49, 49, 450, 450)
+	})
+
+	local icon = noti:object("ImageLabel", {
+		BackgroundTransparency = 1, ImageTransparency = 1,
+		Position = UDim2.fromOffset(1, 1), Size = UDim2.fromOffset(18, 18),
+		Image = "rbxassetid://8628681683", Theme = { ImageColor3 = "Tertiary" }
+	})
+
+	local title = noti:object("TextLabel", {
+		BackgroundTransparency = 1, Position = UDim2.fromOffset(23, 0),
+		Size = UDim2.new(1, -26, 0, 20), Font = Enum.Font.SourceSansBold,
+		Text = options.Title, Theme = { TextColor3 = "Tertiary" }, TextSize = 17,
+		TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
+		TextTruncate = Enum.TextTruncate.AtEnd, TextTransparency = 1
+	})
+
+	local text = noti:object("TextLabel", {
+		BackgroundTransparency = 1, Text = options.Text,
+		Position = UDim2.new(0, 0, 0, 23), Size = UDim2.new(1, 0, 0, textH),
+		TextSize = 16, TextTransparency = 1, TextWrapped = true,
+		TextColor3 = Color3.fromRGB(255, 255, 255),
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top
+	})
+
+	local btnContainer = noti:object("Frame", {
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 0, 0, 23 + textH + 12),
+		Size = UDim2.new(1, 0, 0, btnsH)
+	})
+	btnContainer:object("UIGridLayout", {
+		CellSize = UDim2.fromOffset(btnW, btnH),
+		CellPadding = UDim2.fromOffset(gap, gap),
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder
+	})
+
+	local _btnObjs = {}
+	local closed = false
+	local fadeOut
+	fadeOut = function()
+		if closed then return end
+		closed = true
+		task.delay(0.25, function()
+			pcall(function() noti.AbsoluteObject:Destroy() end)
+			pcall(options.Callback)
+		end)
+		icon:tween({ ImageTransparency = 1, Length = 0.2 })
+		title:tween({ TextTransparency = 1, Length = 0.2 })
+		text:tween({ TextTransparency = 1, Length = 0.2 })
+		_shadow:tween({ ImageTransparency = 1, Length = 0.2 })
+		for _, bb in ipairs(_btnObjs) do
+			pcall(function() bb:tween({ BackgroundTransparency = 1, TextTransparency = 1, Length = 0.2 }) end)
+		end
+		noti:tween({ BackgroundTransparency = 1, Length = 0.2 })
+	end
+
+	for idx, spec in ipairs(btns) do
+		local remaining = spec.Confirm
+		local button = btnContainer:object("TextButton", {
+			Theme = { BackgroundColor3 = "Secondary" },
+			Text = spec.Text, TextSize = 15,
+			TextColor3 = Color3.fromRGB(255, 255, 255),
+			BackgroundTransparency = 1, TextTransparency = 1,
+			LayoutOrder = idx, AutoButtonColor = false
+		}):round(7)
+		_btnObjs[#_btnObjs + 1] = button
+		local stroke = button:object("UIStroke", {
+			Color = (Library.NeonColors and Library.NeonColors.button) or Color3.fromRGB(170, 85, 255),
+			Transparency = 1, Thickness = 1.2
+		})
+		button.MouseEnter:Connect(function()
+			button:tween({ BackgroundColor3 = Library:lighten(Library.CurrentTheme.Secondary, 12) })
+			stroke.Transparency = 0.1
+		end)
+		button.MouseLeave:Connect(function()
+			button:tween({ BackgroundColor3 = Library.CurrentTheme.Secondary })
+			stroke.Transparency = 1
+		end)
+		button.MouseButton1Click:Connect(function()
+			if closed then return end
+			if remaining <= 0 then
+				fadeOut()
+				task.spawn(function() pcall(spec.Callback) end)
+			else
+				self:notification({
+					Title = options.Title,
+					Text = "Click " .. remaining .. " more time" .. ((remaining == 1) and "" or "s")
+						.. " on \"" .. spec.Text .. "\" to confirm your choice.",
+					Duration = 3
+				})
+				remaining = remaining - 1
+			end
+		end)
+	end
+
+	_shadow:tween({ ImageTransparency = .6, Length = 0.2 })
+	noti:tween({ BackgroundTransparency = 0, Length = 0.2, Size = UDim2.fromOffset(width, frameH) }, function()
+		icon:tween({ ImageTransparency = 0, Length = 0.2 })
+		title:tween({ TextTransparency = 0, Length = 0.2 })
+		text:tween({ TextTransparency = 0, Length = 0.2 })
+		for _, bb in ipairs(_btnObjs) do bb:tween({ BackgroundTransparency = 0, TextTransparency = 0, Length = 0.2 }) end
+	end)
+
+	if options.Duration and options.Duration > 0 then
+		task.delay(options.Duration, fadeOut)
+	end
+
+	return { Close = fadeOut }
+end
+
 function Library:tab(options)
 	options = self:set_defaults({
 		Name = "New Tab",
