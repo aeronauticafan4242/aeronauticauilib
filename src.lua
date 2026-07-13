@@ -2320,35 +2320,65 @@ function Library:toggle(options)
 		BackgroundColor3 = Color3.fromRGB(120, 120, 128),
 		Visible = false
 	}):round(100)
-	-- морозная кромка пилюли (видна только в V2 — прозрачное «clear»-стекло айфона)
-	local pillRim = pillTrack:object("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Transparency = 1, Thickness = 1 })
+	-- глянцевый градиент трека (сверху ярко-белый -> книзу прозрачный): «глубокое стекло».
+	-- Включается только в V2; в V1 (зелёная пилюля) выключен -> плоский цвет.
+	local pillGloss = Instance.new("UIGradient")
+	pillGloss.Rotation = 90
+	pillGloss.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.02),
+		NumberSequenceKeypoint.new(0.5, 0.22),
+		NumberSequenceKeypoint.new(1, 0.5),
+	})
+	pillGloss.Enabled = false
+	pillGloss.Parent = pillTrack.AbsoluteObject
+	-- яркая «зеркальная» кромка (ярче сверху), видна только в V2
+	local pillRim = pillTrack:object("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Transparency = 1, Thickness = 1.3 })
+	do
+		local rg = Instance.new("UIGradient")
+		rg.Rotation = 90
+		rg.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.0),
+			NumberSequenceKeypoint.new(1, 0.75),
+		})
+		rg.Parent = pillRim.AbsoluteObject
+	end
 	local pillKnob = pillTrack:object("Frame", {
 		AnchorPoint = Vector2.new(0, 0.5),
 		Position = UDim2.new(0, 3, 0.5, 0),
 		Size = UDim2.fromOffset(22, 22),
 		BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 	}):round(100)
-	pillKnob:object("UIStroke", { Color = Color3.fromRGB(0, 0, 0), Transparency = 0.9, Thickness = 1 })
+	-- глянец бегунка (сверху ярче) — «сочный» блик как на iOS
+	do
+		local kg = Instance.new("UIGradient")
+		kg.Rotation = 90
+		kg.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(223, 227, 235))
+		kg.Parent = pillKnob.AbsoluteObject
+	end
+	pillKnob:object("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Transparency = 0.35, Thickness = 1 })
 
 	local function updatePill(state, animate)
 		local v2 = (Library.Style == "Liquid Glass V2")
-		local trackCol, trackT
+		local trackCol, trackT, knobT
 		if v2 then
-			-- прозрачный белый переключатель как в iOS Liquid Glass (не зелёный)
+			-- яркий прозрачный белый «жидкое стекло» айфона (не серый/зелёный)
 			trackCol = Color3.fromRGB(255, 255, 255)
-			trackT = state and 0.35 or 0.62
+			trackT = state and 0.12 or 0.3   -- включённый — плотнее/ярче
+			knobT = 0
 		else
 			trackCol = state and Color3.fromRGB(52, 199, 89) or Color3.fromRGB(120, 120, 128)
 			trackT = 0
+			knobT = 0
 		end
 		local knobPos = state and UDim2.new(0, 21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
 		if animate then
 			pillTrack:tween{ BackgroundColor3 = trackCol, BackgroundTransparency = trackT, Length = 0.15 }
-			pillKnob:tween{ Position = knobPos, Length = 0.15 }
+			pillKnob:tween{ Position = knobPos, BackgroundTransparency = knobT, Length = 0.15 }
 		else
 			pillTrack.BackgroundColor3 = trackCol
 			pillTrack.BackgroundTransparency = trackT
 			pillKnob.Position = knobPos
+			pillKnob.BackgroundTransparency = knobT
 		end
 	end
 
@@ -2359,7 +2389,8 @@ function Library:toggle(options)
 		onIcon.Visible = not glass
 		offIcon.Visible = not glass
 		pillTrack.Visible = glass
-		pillRim.Transparency = v2 and 0.1 or 1  -- морозная кромка только в V2
+		pillGloss.Enabled = v2          -- глянец только в V2
+		pillRim.Transparency = v2 and 0.05 or 1
 		updatePill(toggled, false)
 	end
 	Library._styleHooks[#Library._styleHooks + 1] = applyStyle
