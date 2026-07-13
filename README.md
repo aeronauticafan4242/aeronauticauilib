@@ -213,6 +213,29 @@ tab:Prompt{
 }
 ```
 
+### 🔘 Feedback Notification *(new)*
+
+A notification with **buttons inside it** — for yes/no style confirmations right in the notification stack (the regular `Notification` is unchanged; this is a separate type).
+
+- Up to **12 buttons**; the text wraps and **never overlaps the buttons**, and the notification **grows** to fit extra rows of buttons.
+- Each button has its own **custom text**, a **Callback**, and an optional **`Confirm`** count — how many *additional* clicks are required to confirm before the callback fires. `Confirm = 0` (default) runs immediately (non‑serious action); `Confirm = 2` means the user must click that button **2 more times** (a regular "Click N more times…" notification is shown in between) before it fires.
+
+```lua
+gui:Feedback{
+    Title    = "Scrap all parts",
+    Text     = "Are you sure you wanna scrap all of your parts? This process can't be aborted. You will get WP in return.",
+    Duration = 0,   -- 0 = stays until a button resolves; >0 = also auto-dismisses
+    Buttons  = {
+        { Text = "Proceed", Confirm = 2, Callback = function() scrapEverything() end },
+        { Text = "Cancel",  Confirm = 0, Callback = function() end },
+    },
+}
+```
+
+With `Confirm = 2`, clicking **Proceed** shows *"Click 2 more times on \"Proceed\" to confirm your choice."*, then *"Click 1 more time…"*, and only the **third** Proceed click runs the callback. `Confirm = 0` buttons (like Cancel) resolve on the first click. Button labels are fully custom — you're not limited to "Proceed/Cancel".
+
+`Feedback` returns a handle with `:Close()` so you can dismiss it programmatically.
+
 ---
 
 ## 🟣 Neon Customization (API)
