@@ -17,6 +17,7 @@
 - 🌈 **Flowing RGB gradients** on text and accents
 - 🎛️ Full component set: toggles, buttons, sliders, dropdowns, textboxes, keybinds, color pickers
 - ✅ **Multi‑select dropdowns** (new!)
+- 🧊 **Liquid Glass mode** *(new!)* — an iOS‑style frosted‑glass skin with pill toggles, switchable live from Settings (**UI Style → Liquid Glass**)
 - 🪟 **Appearance controls** *(new!)* — window **opacity**, **cursor particles**, window **size**, **element size** & **layout mode** (columns), plus **Reset Appearance**, all in the Settings tab
 - 📝 **Auto‑wrapping text** *(new!)* — long descriptions wrap to new lines and grow the row; names never overlap the controls
 - 💾 **Config system** — save / load / delete / rewrite + **autoload** on startup
@@ -232,6 +233,7 @@ The **Settings** tab now includes four live controls so every user can tailor th
 
 | Control | What it does | Default |
 |---|---|---|
+| **UI Style** | **Legacy** (classic), **Liquid Glass** (iOS‑26 frosted glass: translucent panels, light gradient, specular rim, rounded corners, green iOS pill toggles), or **Liquid Glass V2** (the *clear* iPhone look — **white see‑through frosted toggles**, more transparent panels, and a fully‑rounded transparent "Welcome" card). Switches live. | `Legacy` |
 | **Window Opacity** | Transparency of the whole window (100 = solid glass). | `80` (slightly translucent) |
 | **Particles** | Little particles that follow your cursor over the window. | `off` |
 | **Particle Type** | Style of the cursor particles: `Sparks`, `Neon Trail`, `Bubbles`, `Stars`. | `Sparks` |
@@ -253,6 +255,7 @@ Library:setElementScale(110)          -- percent; ~80..130 recommended
 Library:setLayoutMode("2 Columns")    -- "Vertical (List)" | "2 Columns" | "3 Columns"
 Library:setParticlesEnabled(true)     -- cursor particles on/off
 Library:setParticleType("Neon Trail") -- "Sparks" | "Neon Trail" | "Bubbles" | "Stars"
+Library:setUIStyle("Liquid Glass V2") -- "Legacy" | "Liquid Glass" | "Liquid Glass V2"
 ```
 
 > 💡 Columns work with every component — even dropdowns, which resize themselves when opened, keep their column width. The theme picker is kept full‑width automatically so its previews never get squeezed.
