@@ -4833,7 +4833,9 @@ function Library:textbox(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
-	Library:_adaptRow(self, { container = textboxContainer, name = text, desc = description, pad = 100, top = 27, base = 52 })
+	-- pad=180: у текстбокса поле ввода справа широкое (~160px с плейсхолдером),
+	-- поэтому резервируем больше места, чтобы описание не залезало под него.
+	Library:_adaptRow(self, { container = textboxContainer, name = text, desc = description, pad = 180, top = 27, base = 52 })
 
 
 	local textBox = textboxContainer:object("TextBox", {
