@@ -348,7 +348,7 @@ gui:Notification{ Title = "Loaded", Text = "Demo Hub is ready!", Duration = 4 }
 ## 🙏 Credits
 
 - Original **Mercury** UI framework by **Abstract** & **Deity**
-- Neon glow, RGB gradients, multi‑select, config system & other enhancements by **Tot Kto Iz Niotkuda Xploits** ([YouTube](https://www.youtube.com/@corrective))
+- Neon glow, RGB gradients, multi‑select, config system & other enhancements by **Everett** ([YouTube](https://www.youtube.com/@area787))
 
 ---
 
