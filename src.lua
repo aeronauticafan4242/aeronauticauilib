@@ -1862,9 +1862,9 @@ function Library:create(options)
 	creditsTab:credit{Name = "Deity", Description = "UI Library Developer", Discord = "Deity#0228", V3rmillion = "0xDEITY"}
 	creditsTab:credit{Name = "Repository", Description = "UI Library Repository", Github="https://github.com/aeronauticafan4242/aeronauticauilib/tree/main"}
 	creditsTab:credit{
-		Name = "Tot Kto Iz Niotkuda Xploits",
+		Name = "Everett",
 		Description = "Script Developer & UI Library Enhancements",
-		Youtube = "https://www.youtube.com/@corrective",
+		Youtube = "https://www.youtube.com/@area787",
 		Height = 74 -- haii
 	}
 
