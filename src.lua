@@ -14,11 +14,10 @@
 █░░░░░░██████████░░░░░░█░░░░░░░░░░░░░░█░░░░░░██░░░░░░░░░░█░░░░░░░░░░░░░░█░░░░░░░░░░░░░░█░░░░░░██░░░░░░░░░░███████░░░░░░███████
 ██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
 
-edited: 17/7/2026
+edited: 1/26
 developers:
 discord Abstract#8007
 discord Deity#0228
-discord a3ug (@comboy787) on Telegram - UI Library Rework and Enhancements.
 
 ]]
 
@@ -1862,9 +1861,9 @@ function Library:create(options)
 	creditsTab:credit{Name = "Deity", Description = "UI Library Developer", Discord = "Deity#0228", V3rmillion = "0xDEITY"}
 	creditsTab:credit{Name = "Repository", Description = "UI Library Repository", Github="https://github.com/aeronauticafan4242/aeronauticauilib/tree/main"}
 	creditsTab:credit{
-		Name = "Everett",
+		Name = "Tot Kto Iz Niotkuda Xploits",
 		Description = "Script Developer & UI Library Enhancements",
-		Youtube = "https://www.youtube.com/@area787",
+		Youtube = "https://www.youtube.com/@corrective",
 		Height = 74 -- haii
 	}
 
@@ -2921,15 +2920,17 @@ function Library:dropdown(options)
 	end
 
 	function methods:Clear()
-		table.clear(items)
-		itemContainer:tween{Size = UDim2.new(1, -10, 0, 0)}
-		dropdownContainer:tween({Size = dw(baseH())}, function()
-			for i, v in next, itemContainer.AbsoluteObject:GetChildren() do
-				if v.ClassName == "TextButton" then
-					v:Destroy()
-				end
+		-- Уничтожаем кнопки СРАЗУ (не в колбэке твина): иначе AddItems сразу после Clear
+		-- давал пустой список — отложенный destroy сносил только что добавленные кнопки.
+		for _, v in next, itemContainer.AbsoluteObject:GetChildren() do
+			if v.ClassName == "TextButton" then
+				v:Destroy()
 			end
-		end)
+		end
+		table.clear(items)
+		if selectedSet then table.clear(selectedSet) end -- сбрасываем выбор, чтобы галочки совпадали с новым списком
+		itemContainer:tween{Size = UDim2.new(1, -10, 0, 0)}
+		dropdownContainer:tween({Size = dw(baseH())})
 		if open then toggle() end
 	end
 
