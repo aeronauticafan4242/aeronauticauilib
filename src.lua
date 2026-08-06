@@ -324,8 +324,8 @@ function Library:object(class, properties)
 		end,
 		Neon = function(value)
 			if not value then return end
-			-- неон-обводка: еле заметна в покое, разгорается при наведении/нажатии
-			-- value == "tab" -> категория табов, иначе -> кнопки/компоненты
+			-- neon outline: barely visible at rest, brightens on hover/press
+			-- value == "tab" -> tab category, otherwise -> buttons/components
 			local category = (value == "tab") and "tab" or "button"
 			local stroke = Instance.new("UIStroke")
 			stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
@@ -342,7 +342,7 @@ function Library:object(class, properties)
 			localObject.MouseLeave:Connect(function()
 				TweenService:Create(stroke, TweenInfo.new(0.2), {Transparency = 0.55}):Play()
 			end)
-			pcall(function() -- MouseButton1Down есть только у кнопок
+			pcall(function() -- MouseButton1Down only exists on buttons
 				localObject.MouseButton1Down:Connect(function()
 					TweenService:Create(stroke, TweenInfo.new(0.08), {Transparency = 0}):Play()
 				end)
@@ -417,17 +417,517 @@ function Library:lighten(color, f)
 	return Color3.fromHSV(h, math.clamp(s*f, 0, 1), math.clamp(v/f, 0, 1))
 end
 
-Library.NeonColor = Color3.fromRGB(170, 85, 255) -- базовый цвет неона (fallback)
--- Раздельные цвета неона для кнопок и табов (меняются цветпикерами в Settings)
+Library.NeonColor = Color3.fromRGB(170, 85, 255) -- base neon color (fallback)
+-- Separate neon colors for buttons and tabs (changed via the color pickers in Settings)
 Library.NeonColors = {
 	button = Color3.fromRGB(170, 85, 255),
 	tab = Color3.fromRGB(170, 85, 255)
 }
--- Реестр живых обводок, чтобы можно было перекрасить уже созданные элементы
+-- Registry of live strokes so already-created elements can be recolored
 Library.NeonStrokes = {
 	button = {},
 	tab = {}
 }
+
+-- ===== Neon color setters (used by color pickers AND config load) =====
+function Library:setWindowNeon(color)
+	local wn = Library._windowNeon
+	if not wn then return end
+	local seq = ColorSequence.new({
+		ColorSequenceKeypoint.new(0.0, color),
+		ColorSequenceKeypoint.new(0.5, Library:lighten(color, 25)),
+		ColorSequenceKeypoint.new(1.0, color)
+	})
+	if wn.grad then wn.grad.Color = seq end
+	if wn.glowGrad then wn.glowGrad.Color = seq end
+	if wn.glow then wn.glow.Color = color end
+end
+
+function Library:setButtonNeon(color)
+	Library.NeonColors.button = color
+	for _, s in next, Library.NeonStrokes.button do s.Color = color end
+end
+
+function Library:setTabNeon(color)
+	Library.NeonColors.tab = color
+	for _, s in next, Library.NeonStrokes.tab do s.Color = color end
+end
+
+-- ===== Config system (save / load / delete / autoload) =====
+local CONFIG_FOLDER = "GrindnauticaConfigs"
+
+local function c3ToTable(c)
+	return { math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5) }
+end
+local function tableToC3(t)
+	return Color3.fromRGB(t[1] or 255, t[2] or 255, t[3] or 255)
+end
+
+local function ensureConfigFolder()
+	if makefolder and isfolder and not isfolder(CONFIG_FOLDER) then
+		pcall(makefolder, CONFIG_FOLDER)
+	end
+end
+
+-- ===== Registry of savable component states =====
+-- Каждый компонент (toggle/slider/dropdown/textbox/keybind) регистрирует get/set по своему имени.
+Library._savable = {}
+Library._pendingSettings = nil -- настройки, ожидающие компонентов (при загрузке до их создания)
+Library._saveAll = false       -- "Save all settings": сохранять состояния всех функций скрипта, не только меню
+
+-- ===== Appearance state (opacity / window scale / element scale / layout mode) =====
+-- Все значения по умолчанию воспроизводят ТЕКУЩИЙ вид 1-в-1 (scale = 1, ширина без изменений),
+-- поэтому включение этих фич не ломает существующие скрипты.
+Library._skinComponents = {}   -- список Instance'ов внешних фреймов компонентов (для ре-стайла)
+Library._skinTabs = {}         -- { {container = <ScrollingFrame>, layout = <UIListLayout>}, ... }
+Library.WindowScale  = 1       -- общий масштаб окна (UIScale на core)
+Library.ElementScale = 1       -- масштаб отдельных элементов (UIScale на каждом компоненте)
+Library.LayoutCols   = 1       -- 1 = вертикальный список, 2/3 = колонки
+Library.WindowOpacity = 0.8    -- 1 = непрозрачно; по умолчанию слегка прозрачное окно
+Library.Style        = "Legacy" -- "Legacy" | "Liquid Glass" (iOS-стекло)
+Library._styleHooks  = {}      -- функции компонентов, которым нужна структурная смена (тогглы-пилюли)
+
+-- Эти настройки меню сохраняются ВСЕГДА (даже если "Save all settings" выключен)
+local ALWAYS_SAVE = {
+	["Toggle Key"] = true,
+	["Lock Dragging"] = true,
+	["UI Drag Speed"] = true,
+	["Save all settings"] = true,
+	["Window Opacity"] = true,
+	["Window Size"] = true,
+	["Element Size"] = true,
+	["Layout Mode"] = true,
+	["Particles"] = true,
+	["Particle Type"] = true,
+	["UI Style"] = true
+}
+
+function Library:_registerSavable(key, kind, getFn, setFn)
+	Library._savable[#Library._savable + 1] = { key = key, kind = kind, get = getFn, set = setFn }
+	-- если загрузка конфига произошла ДО создания этого компонента — применяем сохранённое значение сейчас
+	if Library._pendingSettings and Library._pendingSettings[key] ~= nil then
+		pcall(setFn, Library._pendingSettings[key])
+	end
+end
+
+-- Текущие настройки (цвета неона + тема + состояния компонентов) -> таблица
+function Library:getConfig()
+	local wn = Library._windowNeon
+	local windowColor = (wn and wn.glow and wn.glow.Color) or Library.NeonColor
+	-- имя текущей темы (для сохранения)
+	local themeName
+	for name, t in next, Library.Themes do
+		if t == Library.CurrentTheme then
+			themeName = name
+			break
+		end
+	end
+	-- состояния компонентов: меню — всегда, остальное — только при Save all settings
+	local settings = {}
+	for _, s in ipairs(Library._savable) do
+		if Library._saveAll or ALWAYS_SAVE[s.key] then
+			local ok, v = pcall(s.get)
+			if ok and v ~= nil then settings[s.key] = v end
+		end
+	end
+	return {
+		theme = themeName,
+		window = c3ToTable(windowColor),
+		button = c3ToTable(Library.NeonColors.button),
+		tab = c3ToTable(Library.NeonColors.tab),
+		settings = settings
+	}
+end
+
+function Library:applyConfig(cfg)
+	if type(cfg) ~= "table" then return end
+	-- тему применяем первой (она перекрашивает тематические элементы)
+	if cfg.theme and Library.Themes[cfg.theme] then
+		pcall(function() Library:change_theme(Library.Themes[cfg.theme]) end)
+	end
+	if cfg.window then Library:setWindowNeon(tableToC3(cfg.window)) end
+	if cfg.button then Library:setButtonNeon(tableToC3(cfg.button)) end
+	if cfg.tab then Library:setTabNeon(tableToC3(cfg.tab)) end
+	if type(cfg.settings) == "table" then
+		-- запоминаем для компонентов, которые создадутся ПОЗЖЕ (скрипт строит UI после Create)
+		Library._pendingSettings = cfg.settings
+		-- и сразу применяем к уже существующим
+		for _, s in ipairs(Library._savable) do
+			local v = cfg.settings[s.key]
+			if v ~= nil then pcall(s.set, v) end
+		end
+	end
+end
+
+-- Save работает и как "rewrite": если файл существует, он перезаписывается
+function Library:saveConfig(name)
+	if not (writefile and name and name ~= "") then return false end
+	ensureConfigFolder()
+	local ok = pcall(function()
+		writefile(CONFIG_FOLDER .. "/" .. name .. ".json", HTTPService:JSONEncode(Library:getConfig()))
+	end)
+	return ok
+end
+
+function Library:loadConfig(name)
+	if not (readfile and isfile and name and name ~= "") then return false end
+	local path = CONFIG_FOLDER .. "/" .. name .. ".json"
+	if not isfile(path) then return false end
+	local ok, data = pcall(function() return HTTPService:JSONDecode(readfile(path)) end)
+	if ok and data then
+		Library:applyConfig(data)
+		return true
+	end
+	return false
+end
+
+function Library:deleteConfig(name)
+	local path = CONFIG_FOLDER .. "/" .. name .. ".json"
+	if delfile and isfile and isfile(path) then
+		pcall(delfile, path)
+		-- если удаляемый конфиг был автозагрузкой — сбрасываем автозагрузку
+		if Library:getAutoload() == name then Library:setAutoload("") end
+		return true
+	end
+	return false
+end
+
+function Library:listConfigs()
+	local out = {}
+	if listfiles and isfolder and isfolder(CONFIG_FOLDER) then
+		local ok, files = pcall(listfiles, CONFIG_FOLDER)
+		if ok and files then
+			for _, f in ipairs(files) do
+				local n = tostring(f):match("([^/\\]+)%.json$")
+				if n then out[#out + 1] = n end
+			end
+		end
+	end
+	return out
+end
+
+function Library:setAutoload(name)
+	if not writefile then return end
+	ensureConfigFolder()
+	pcall(function() writefile(CONFIG_FOLDER .. "/_autoload.cfg", name or "") end)
+end
+
+function Library:getAutoload()
+	local path = CONFIG_FOLDER .. "/_autoload.cfg"
+	if readfile and isfile and isfile(path) then
+		local ok, v = pcall(readfile, path)
+		if ok and v and v ~= "" then return v end
+	end
+	return nil
+end
+
+-- =====================================================================
+--  Appearance engine: opacity / window scale / element scale / layout
+--  Спроектировано так, чтобы фичи НЕ конфликтовали между собой:
+--   * opacity   -> только core.BackgroundTransparency
+--   * window    -> UIScale на core (масштабирует всё окно целиком)
+--   * element   -> UIScale на каждом компоненте (не трогает ширину)
+--   * layout    -> FillDirection/Wraps слоя + ширина компонентов
+--  Значения по умолчанию (scale=1, cols=1) дают тот же вид, что и раньше.
+-- =====================================================================
+
+-- Текущая целевая ширина внешнего фрейма компонента (scale, offset).
+-- Дропдаун сам меняет свой размер при раскрытии, поэтому он читает эти
+-- атрибуты, чтобы не сбрасывать колоночную ширину обратно на всю строку.
+function Library:_compWidth(inst)
+	local ws = inst and inst:GetAttribute("_wScale")
+	local wo = inst and inst:GetAttribute("_wOff")
+	if ws == nil then ws = 1 end
+	if wo == nil then wo = -20 end
+	return ws, wo
+end
+
+-- Применить текущие layout+element настройки к ОДНОМУ компоненту.
+function Library:_styleComponent(inst)
+	if not inst then return end
+	-- запоминаем исходный offset ширины ОДИН раз (у section он -24, у прочих -20)
+	local baseWOff = inst:GetAttribute("_baseWOff")
+	if baseWOff == nil then baseWOff = inst.Size.X.Offset; inst:SetAttribute("_baseWOff", baseWOff) end
+
+	local es   = Library.ElementScale or 1
+	local cols = Library.LayoutCols or 1
+	local wScale, wOff
+	if cols <= 1 then
+		-- вертикальный список: полная ширина строки (как было), делим на es чтобы
+		-- UIScale не «съедал» ширину (в списке элемент должен занимать всю строку).
+		wScale, wOff = 1 / es, baseWOff / es
+	else
+		-- N колонок: доля 1/cols, небольшой боковой отступ. Делим на es —
+		-- после умножения UIScale итоговая ширина колонки будет ровно 1/cols.
+		wScale, wOff = (1 / cols) / es, -12 / es
+	end
+	inst:SetAttribute("_wScale", wScale)
+	inst:SetAttribute("_wOff", wOff)
+	-- меняем ТОЛЬКО ширину, высоту оставляем как есть (её масштабирует UIScale)
+	inst.Size = UDim2.new(wScale, wOff, inst.Size.Y.Scale, inst.Size.Y.Offset)
+
+	local sc = inst:FindFirstChild("_uiScale")
+	if not sc then
+		sc = Instance.new("UIScale")
+		sc.Name = "_uiScale"
+		sc.Parent = inst
+	end
+	sc.Scale = es
+end
+
+-- Настроить UIListLayout вкладки под выбранный режим отображения.
+function Library:_styleLayout(layoutInst)
+	if not layoutInst then return end
+	local cols = Library.LayoutCols or 1
+	if cols <= 1 then
+		layoutInst.FillDirection = Enum.FillDirection.Vertical
+		pcall(function() layoutInst.Wraps = false end)
+		layoutInst.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		layoutInst.Padding = UDim.new(0, 10)
+	else
+		layoutInst.FillDirection = Enum.FillDirection.Horizontal
+		pcall(function() layoutInst.Wraps = true end)
+		layoutInst.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		layoutInst.Padding = UDim.new(0, 8)
+	end
+end
+
+-- Зарегистрировать (один раз) все новые компоненты вкладки и применить стиль.
+function Library:_skinChildren(parentInst)
+	if not parentInst then return end
+	for _, ch in ipairs(parentInst:GetChildren()) do
+		-- _noskin: элементы со своей внутренней вёрсткой (напр. выбор темы с UIGridLayout),
+		-- которым нельзя менять ширину под колонки — иначе содержимое уезжает за край.
+		if ch:IsA("GuiObject") and not ch:GetAttribute("_skinned") and not ch:GetAttribute("_noskin") then
+			ch:SetAttribute("_skinned", true)
+			Library._skinComponents[#Library._skinComponents + 1] = ch
+			pcall(function() Library:_styleComponent(ch) end)
+			-- если активен Liquid Glass — сразу «остекляем» новый компонент
+			if Library.Style == "Liquid Glass" then
+				Library:_applyGlassToComponent(ch, true)
+			end
+		end
+	end
+end
+
+-- Адаптивный текст строки компонента:
+--  * имя обрезается «…» и не налезает на правый контрол (галочку/бокс/иконку);
+--  * описание переносится на новые строки и РАСТИТ высоту строки под текст.
+-- Высота считается в локальных координатах (делим AbsoluteSize на общий масштаб),
+-- поэтому корректно работает вместе с Window Size и Element Size.
+function Library:_adaptRow(tabSelf, o)
+	local raw = o.container and (o.container.AbsoluteObject or o.container)
+	if not raw then return end
+	local pad = o.pad or 55
+	if o.name then
+		pcall(function()
+			o.name.TextTruncate = Enum.TextTruncate.AtEnd
+			local ny = o.name.Size.Y
+			o.name.Size = UDim2.new(1, -pad, ny.Scale, ny.Offset)
+		end)
+	end
+	if o.desc then
+		local descInst = o.desc.AbsoluteObject or o.desc
+		pcall(function()
+			o.desc.TextWrapped = true
+			o.desc.TextYAlignment = Enum.TextYAlignment.Top
+			o.desc.AutomaticSize = Enum.AutomaticSize.Y
+			o.desc.Size = UDim2.new(1, -pad, 0, 0)
+		end)
+		local top    = o.top or 27
+		local base   = o.base or raw.Size.Y.Offset
+		local bottom = o.bottom or 10
+		local function fit()
+			local total = (Library.WindowScale or 1) * (Library.ElementScale or 1)
+			if total <= 0 then total = 1 end
+			local dh = descInst.AbsoluteSize.Y / total
+			local newH = math.max(base, top + dh + bottom)
+			-- публикуем «базовую» высоту строки: компоненты со своим ресайзом
+			-- (дропдаун) читают её, чтобы не сбрасывать высоту при сворачивании
+			pcall(function() raw:SetAttribute("_rowBase", newH) end)
+			if math.abs(newH - raw.Size.Y.Offset) > 0.5 then
+				raw.Size = UDim2.new(raw.Size.X.Scale, raw.Size.X.Offset, 0, newH)
+				pcall(function() tabSelf:_resize_tab() end)
+			end
+		end
+		pcall(function() descInst:GetPropertyChangedSignal("AbsoluteSize"):Connect(fit) end)
+		task.defer(fit)
+	end
+end
+
+-- Пересчитать CanvasSize всех вкладок (учитывая масштаб окна).
+function Library:_reflowCanvas()
+	local ws = Library.WindowScale or 1
+	task.defer(function()
+		for _, t in ipairs(Library._skinTabs) do
+			pcall(function()
+				t.container.CanvasSize = UDim2.fromOffset(0, t.layout.AbsoluteContentSize.Y / ws + 20)
+			end)
+		end
+	end)
+end
+
+-- ---- Публичные сеттеры (используются слайдерами/дропдауном в Settings и загрузкой конфига) ----
+
+function Library:setWindowOpacity(pct)
+	local a = math.clamp((tonumber(pct) or 100) / 100, 0, 1) -- 1 = непрозрачно
+	Library.WindowOpacity = a
+	if Library.mainFrame then
+		pcall(function() Library.mainFrame.BackgroundTransparency = 1 - a end)
+	end
+end
+
+function Library:setWindowScale(pct)
+	local s = math.clamp((tonumber(pct) or 100) / 100, 0.5, 1.3)
+	Library.WindowScale = s
+	if Library._windowScaleObj then
+		Library._windowScaleObj.Scale = s
+	end
+	Library:_reflowCanvas()
+end
+
+function Library:setElementScale(pct)
+	local s = math.clamp((tonumber(pct) or 100) / 100, 0.7, 1.4)
+	Library.ElementScale = s
+	for _, inst in ipairs(Library._skinComponents) do
+		pcall(function() Library:_styleComponent(inst) end)
+	end
+	Library:_reflowCanvas()
+end
+
+function Library:setLayoutMode(mode)
+	local cols = 1
+	if mode == "2 Columns" then
+		cols = 2
+	elseif mode == "3 Columns" then
+		cols = 3
+	end
+	Library.LayoutCols = cols
+	Library.LayoutMode = mode
+	for _, t in ipairs(Library._skinTabs) do
+		pcall(function() Library:_styleLayout(t.layout) end)
+	end
+	for _, inst in ipairs(Library._skinComponents) do
+		pcall(function() Library:_styleComponent(inst) end)
+	end
+	Library:_reflowCanvas()
+end
+
+-- ===== Курсорные партиклы (отклик окна на движение мыши) =====
+Library._particles = { enabled = false, kind = "Sparks" }
+
+function Library:setParticlesEnabled(on)
+	Library._particles.enabled = on and true or false
+end
+
+function Library:setParticleType(kind)
+	if kind and kind ~= "" then
+		Library._particles.kind = kind
+	end
+end
+
+-- ===================================================================
+--  Liquid Glass — «стеклянный» стиль в духе iOS 26.
+--  Работает поверх Legacy как обратимый скин: полупрозрачный фон,
+--  мягкий световой градиент, яркая «зеркальная» кромка и крупные
+--  скругления. Тогглы превращаются в iOS-пилюли. Переключается вживую.
+-- ===================================================================
+-- on = включить стекло; cornerRadius — переопределение скругления (напр. 26 для «Welcome»)
+function Library:_applyGlassToComponent(inst, on, cornerRadius)
+	if not inst then return end
+	cornerRadius = cornerRadius or 14
+	pcall(function()
+		local corner = inst:FindFirstChildOfClass("UICorner")
+		if on then
+			local v2 = (Library.Style == "Liquid Glass V2")
+			if corner then
+				if inst:GetAttribute("_lcorner") == nil then
+					inst:SetAttribute("_lcorner", corner.CornerRadius.Offset)
+				end
+				corner.CornerRadius = UDim.new(0, cornerRadius)
+			end
+			if inst:GetAttribute("_lbgT") == nil then
+				inst:SetAttribute("_lbgT", inst.BackgroundTransparency)
+			end
+			-- V2 «прозрачнее» (как clear-стекло айфона), но фон НЕ белим — иначе белый текст пропадёт
+			inst.BackgroundTransparency = v2 and 0.5 or 0.35
+			-- световой градиент фона (сверху светлее — эффект стекла)
+			local base = inst.BackgroundColor3
+			local sheen = inst:FindFirstChild("_glassSheen")
+			if not sheen then
+				sheen = Instance.new("UIGradient")
+				sheen.Name = "_glassSheen"
+				sheen.Rotation = 90
+				sheen.Parent = inst
+			end
+			sheen.Color = ColorSequence.new(Library:lighten(base, v2 and 24 or 30), base)
+			-- «зеркальная» кромка (ярче сверху; в V2 — заметнее, белее)
+			local rim = inst:FindFirstChild("_glassRim")
+			if not rim then
+				rim = Instance.new("UIStroke")
+				rim.Name = "_glassRim"
+				rim.Color = Color3.fromRGB(255, 255, 255)
+				rim.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+				local sg = Instance.new("UIGradient")
+				sg.Rotation = 90
+				sg.Transparency = NumberSequence.new({
+					NumberSequenceKeypoint.new(0, 0.05),
+					NumberSequenceKeypoint.new(1, 0.85),
+				})
+				sg.Parent = rim
+				rim.Parent = inst
+			end
+			rim.Thickness = 1.5
+			rim.Transparency = v2 and 0.12 or 0.35
+		else
+			local lc = inst:GetAttribute("_lcorner")
+			if corner and lc then corner.CornerRadius = UDim.new(0, lc) end
+			local lb = inst:GetAttribute("_lbgT")
+			if lb ~= nil then inst.BackgroundTransparency = lb end
+			local a = inst:FindFirstChild("_glassSheen"); if a then a:Destroy() end
+			local b = inst:FindFirstChild("_glassRim"); if b then b:Destroy() end
+		end
+	end)
+end
+
+function Library:_applyWindowGlass(on)
+	local core = Library.mainFrame
+	if not core then return end
+	local raw = core.AbsoluteObject or core
+	pcall(function()
+		if on then
+			if not raw:FindFirstChild("_glassSheen") then
+				local base = raw.BackgroundColor3
+				local g = Instance.new("UIGradient")
+				g.Name = "_glassSheen"
+				g.Rotation = 90
+				g.Color = ColorSequence.new(Library:lighten(base, 16), base)
+				g.Parent = raw
+			end
+		else
+			local s = raw:FindFirstChild("_glassSheen"); if s then s:Destroy() end
+		end
+	end)
+end
+
+function Library:setUIStyle(name)
+	if name ~= "Liquid Glass" and name ~= "Liquid Glass V2" then
+		name = "Legacy"
+	end
+	local glass = (name ~= "Legacy")
+	Library.Style = name
+	for _, inst in ipairs(Library._skinComponents) do
+		Library:_applyGlassToComponent(inst, glass)
+	end
+	for _, fn in ipairs(Library._styleHooks) do
+		pcall(fn, name)
+	end
+	Library:_applyWindowGlass(glass)
+	-- поверхность «Welcome, ник» — прозрачная и максимально скруглённая в стеклянных режимах
+	if Library._profileFrame then
+		Library:_applyGlassToComponent(Library._profileFrame, glass, 32)
+	end
+end
 
 --[[ old lighten/darken functions, may revert if contrast gets fucked up
 
@@ -583,6 +1083,98 @@ function Library:create(options)
 
 	self.mainFrame = core
 
+	-- ===== Appearance hooks =====
+	-- окно слегка прозрачное по умолчанию (fade() использует отдельный оверлей,
+	-- поэтому BackgroundTransparency самого core свободен под настройку opacity)
+	pcall(function() core.BackgroundTransparency = 1 - (Library.WindowOpacity or 0.85) end)
+	-- UIScale для настройки размера окна (масштабирует всё окно целиком)
+	Library._windowScaleObj = Instance.new("UIScale")
+	Library._windowScaleObj.Name = "_windowScale"
+	Library._windowScaleObj.Scale = Library.WindowScale or 1
+	Library._windowScaleObj.Parent = core.AbsoluteObject
+
+	-- ===== Слой курсорных партиклов =====
+	do
+		local particleLayer = core:object("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.fromScale(1, 1),
+			ClipsDescendants = true,
+			Active = false,
+			ZIndex = 6
+		})
+		Library._particleLayer = particleLayer
+		local rnd = Random.new()
+		local lastSpawn = 0
+
+		local function neon()
+			return (Library.NeonColors and Library.NeonColors.button) or Library.NeonColor or Color3.fromRGB(170, 85, 255)
+		end
+
+		local function spawn(lx, ly)
+			local kind = Library._particles.kind
+			local col = neon()
+			if kind == "Bubbles" then
+				local sz = rnd:NextInteger(9, 17)
+				local p = particleLayer:object("Frame", {
+					BackgroundColor3 = col, BackgroundTransparency = 0.7,
+					Position = UDim2.fromOffset(lx - sz / 2, ly - sz / 2),
+					Size = UDim2.fromOffset(sz, sz), ZIndex = 6
+				}):round(100)
+				p:object("UIStroke", { Color = col, Transparency = 0.2, Thickness = 1 })
+				p:tween({ Position = UDim2.fromOffset(lx - sz, ly - rnd:NextInteger(35, 65)), Size = UDim2.fromOffset(sz * 2, sz * 2), BackgroundTransparency = 1, Length = 0.85 },
+					function() p.AbsoluteObject:Destroy() end)
+			elseif kind == "Stars" then
+				-- маленький неоновый «ромб» (повёрнутый квадрат) — не зависит от шрифта
+				local s = rnd:NextInteger(8, 14)
+				local p = particleLayer:object("Frame", {
+					BackgroundColor3 = col, BackgroundTransparency = 0.15,
+					Position = UDim2.fromOffset(lx - s / 2, ly - s / 2), Size = UDim2.fromOffset(s, s),
+					ZIndex = 6, Rotation = 45
+				}):round(2)
+				p:object("UIStroke", { Color = col, Transparency = 0, Thickness = 1 })
+				p:tween({ Rotation = 225, BackgroundTransparency = 1, Size = UDim2.fromOffset(1, 1), Position = UDim2.fromOffset(lx, ly - rnd:NextInteger(22, 52)), Length = 0.75 },
+					function() p.AbsoluteObject:Destroy() end)
+			elseif kind == "Neon Trail" then
+				local sz = rnd:NextInteger(6, 10)
+				local p = particleLayer:object("Frame", {
+					BackgroundColor3 = col,
+					Position = UDim2.fromOffset(lx - sz / 2, ly - sz / 2),
+					Size = UDim2.fromOffset(sz, sz), ZIndex = 6
+				}):round(100)
+				p:object("UIStroke", { Color = col, Transparency = 0, Thickness = 1 })
+				p:tween({ Size = UDim2.fromOffset(1, 1), BackgroundTransparency = 1, Length = 0.5 },
+					function() p.AbsoluteObject:Destroy() end)
+			else -- Sparks (по умолчанию)
+				local sz = rnd:NextInteger(3, 6)
+				local dx = rnd:NextInteger(-18, 18)
+				local p = particleLayer:object("Frame", {
+					BackgroundColor3 = col,
+					Position = UDim2.fromOffset(lx, ly),
+					Size = UDim2.fromOffset(sz, sz), ZIndex = 6
+				}):round(100)
+				p:tween({ Position = UDim2.fromOffset(lx + dx, ly - rnd:NextInteger(20, 45)), BackgroundTransparency = 1, Size = UDim2.fromOffset(1, 1), Length = 0.5 },
+					function() p.AbsoluteObject:Destroy() end)
+			end
+		end
+
+		UserInputService.InputChanged:Connect(function(input)
+			if input.UserInputType ~= Enum.UserInputType.MouseMovement then return end
+			if not (Library._particles and Library._particles.enabled) then return end
+			local now = os.clock()
+			if now - lastSpawn < 0.03 then return end
+			-- курсор внутри окна? (координаты как в drag-логике: Mouse.X/Y vs AbsolutePosition)
+			local ap, asz = core.AbsolutePosition, core.AbsoluteSize
+			if asz.X < 5 or asz.Y < 5 then return end -- окно свёрнуто
+			local mx, my = Mouse.X, Mouse.Y
+			if mx < ap.X or mx > ap.X + asz.X or my < ap.Y or my > ap.Y + asz.Y then return end
+			lastSpawn = now
+			local wsc = Library.WindowScale or 1
+			local lx = (mx - ap.X) / wsc
+			local ly = (my - ap.Y) / wsc
+			pcall(spawn, lx, ly)
+		end)
+	end
+
 	local tabButtons = core:object("ScrollingFrame", {
 		Size = UDim2.new(1, -40, 0, 25),
 		Position = UDim2.fromOffset(5, 5),
@@ -619,11 +1211,42 @@ function Library:create(options)
 
 	local function closeUI()
 		core.ClipsDescendants = true
-		core:fade(true)
-		wait(0.1)
-		core:tween({Size = UDim2.new()}, function()
-			gui.AbsoluteObject:Destroy()
+		local TweenService = game:GetService("TweenService")
+		local win = core.AbsoluteObject
+		local destroyed = false
+		local function killGui()
+			if destroyed then return end
+			destroyed = true
+			pcall(function() gui.AbsoluteObject:Destroy() end)
+		end
+
+		-- свечение окна быстро мигает: красный <-> оранжевый
+		task.spawn(function()
+			for i = 1, 8 do
+				local c = (i % 2 == 1) and Color3.fromRGB(255, 45, 45) or Color3.fromRGB(255, 150, 0)
+				pcall(function() Library:setWindowNeon(c) end)
+				task.wait(0.055)
+			end
 		end)
+
+		-- содержимое гаснет
+		pcall(function() core:fade(true) end)
+
+		-- окно «сдувает как пыль»: лёгкий пшик -> схлопывание + уход вверх-вбок + наклон
+		pcall(function()
+			TweenService:Create(win, TweenInfo.new(0.09, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ Size = win.Size + UDim2.fromOffset(24, 16) }):Play()
+		end)
+		task.delay(0.09, function()
+			local blow = TweenService:Create(win, TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+				Size = UDim2.new(0, 0, 0, 0),
+				Position = win.Position + UDim2.fromOffset(150, -230),
+				Rotation = 24
+			})
+			blow.Completed:Connect(killGui)
+			blow:Play()
+		end)
+		task.delay(0.8, killGui) -- страховка
 	end
 
 	if getgenv then
@@ -683,17 +1306,17 @@ function Library:create(options)
 		SliceScale = 1
 	})
 
-	-- ===== Неоновая переливающаяся фиолетовая обводка + свечение =====
-	-- Палитра (яркая, не тёмная). Можно поменять цвета здесь.
+	-- ===== Animated iridescent purple neon border + glow =====
+	-- Palette (bright, not dark). Change the colors here.
 	local NEON = {
-		Color3.fromRGB(170, 85, 255),   -- основной фиолет
-		Color3.fromRGB(120, 80, 255),   -- сине-фиолет
-		Color3.fromRGB(214, 120, 255),  -- розово-фиолет
-		Color3.fromRGB(90, 170, 255)    -- голубой блик
+		Color3.fromRGB(170, 85, 255),   -- main purple
+		Color3.fromRGB(120, 80, 255),   -- blue-purple
+		Color3.fromRGB(214, 120, 255),  -- pink-purple
+		Color3.fromRGB(90, 170, 255)    -- blue highlight
 	}
 
-	-- Мягкий ореол-свечение: отдельная СКРУГЛЁННАЯ рамка по габаритам окна с широкой полупрозрачной обводкой.
-	-- UIStroke всегда повторяет UICorner -> углы скруглены (раньше тут была картинка с квадратными углами).
+	-- Soft glow halo: a separate ROUNDED frame matching the window, with a wide semi-transparent stroke.
+	-- UIStroke always follows UICorner -> rounded corners (this used to be an image with square corners).
 	local neonGlowFrame = core:object("Frame", {
 		BackgroundTransparency = 1,
 		Size = UDim2.fromScale(1, 1),
@@ -707,7 +1330,7 @@ function Library:create(options)
 		Transparency = 0.6
 	})
 
-	-- Яркая тонкая обводка по самому краю окна, окрашенная анимированным градиентом
+	-- Bright thin border on the window edge, colored by an animated gradient
 	local neonStroke = core:object("UIStroke", {
 		Thickness = 2,
 		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
@@ -724,11 +1347,14 @@ function Library:create(options)
 	})
 	neonGradient.Parent = neonStroke.AbsoluteObject
 
-	-- тот же градиент на ореоле, чтобы свечение тоже переливалось
+	-- same gradient on the halo so the glow shimmers too
 	local neonGlowGradient = neonGradient:Clone()
 	neonGlowGradient.Parent = neonGlow.AbsoluteObject
 
-	-- Переливание: вращаем градиенты + мягко пульсируем толщиной обводки и яркостью ореола
+	-- сохраняем ссылки, чтобы цветпикеры и загрузка конфига могли перекрашивать окно
+	Library._windowNeon = { grad = neonGradient, glowGrad = neonGlowGradient, glow = neonGlow }
+
+	-- Shimmer: rotate the gradients + gently pulse stroke thickness and halo brightness
 	local neonConn
 	neonConn = RunService.RenderStepped:Connect(function(dt)
 		local obj = core.AbsoluteObject
@@ -863,6 +1489,9 @@ function Library:create(options)
 		Theme = {BackgroundColor3 = "Secondary"},
 		Size = UDim2.new(1, -20, 0, 100)
 	}):round(7)
+
+	-- «Welcome, ник» — регистрируем поверхность, чтобы Liquid Glass мог сделать её прозрачной/круглой
+	Library._profileFrame = profile.AbsoluteObject
 
 	local profilePictureContainer = profile:object("ImageLabel", {
 		Image = Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100),
@@ -1012,20 +1641,117 @@ function Library:create(options)
 		end,
 	}
 
+	-- ===== Appearance (style / opacity / particles / size / element size / layout) =====
+	settingsTab:dropdown{
+		Name = "UI Style",
+		StartingText = "Legacy",
+		Description = "Legacy = classic. Liquid Glass = iOS frosted glass. Liquid Glass V2 = clear iPhone glass (white see-through toggles).",
+		Items = { "Legacy", "Liquid Glass", "Liquid Glass V2" },
+		Callback = function(style)
+			Library:setUIStyle(style)
+		end,
+	}
+
+	settingsTab:slider{
+		Name = "Window Opacity",
+		Description = "How see-through the whole window is (100 = solid).",
+		Min = 20,
+		Max = 100,
+		Default = 80,
+		Callback = function(value)
+			Library:setWindowOpacity(value)
+		end,
+	}
+
+	settingsTab:toggle{
+		Name = "Particles",
+		Description = "Spawn little particles that follow your cursor over the window.",
+		StartingState = false,
+		Callback = function(state)
+			Library:setParticlesEnabled(state)
+		end,
+	}
+
+	settingsTab:dropdown{
+		Name = "Particle Type",
+		StartingText = "Sparks",
+		Description = "Style of the cursor particles.",
+		Items = { "Sparks", "Neon Trail", "Bubbles", "Stars" },
+		Callback = function(kind)
+			Library:setParticleType(kind)
+		end,
+	}
+
+	settingsTab:slider{
+		Name = "Window Size",
+		Description = "Overall UI scale — shrink it for laptops / small screens.",
+		Min = 60,
+		Max = 115,
+		Default = 100,
+		Callback = function(value)
+			Library:setWindowScale(value)
+		end,
+	}
+
+	settingsTab:slider{
+		Name = "Element Size",
+		Description = "Size of buttons, sliders, dropdowns and every element.",
+		Min = 80,
+		Max = 130,
+		Default = 100,
+		Callback = function(value)
+			Library:setElementScale(value)
+		end,
+	}
+
+	settingsTab:dropdown{
+		Name = "Layout Mode",
+		StartingText = "Vertical (List)",
+		Description = "How elements are arranged inside each tab.",
+		Items = { "Vertical (List)", "2 Columns", "3 Columns" },
+		Callback = function(mode)
+			Library:setLayoutMode(mode)
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Reset Appearance",
+		Description = "Reset opacity, size, element size, layout and particles to defaults.",
+		Callback = function()
+			-- сбрасываем через savable-set: обновляет и значение, и сам контрол в UI
+			local defaults = {
+				["UI Style"] = "Legacy",
+				["Window Opacity"] = 80,
+				["Window Size"] = 100,
+				["Element Size"] = 100,
+				["Layout Mode"] = "Vertical (List)",
+				["Particles"] = false,
+				["Particle Type"] = "Sparks",
+			}
+			for _, s in ipairs(Library._savable) do
+				if defaults[s.key] ~= nil then
+					pcall(s.set, defaults[s.key])
+				end
+			end
+			mt:notification{ Title = "Appearance", Text = "Reset to defaults", Duration = 3 }
+		end,
+	}
+
+	settingsTab:toggle{
+		Name = "Save all settings",
+		Description = "Also save every script feature's state to configs (not just the menu). Off by default.",
+		StartingState = false,
+		Callback = function(state)
+			Library._saveAll = state
+		end,
+	}
+
 	settingsTab:color_picker{
 		Name = "Window Glow Color",
 		Description = "Color of the window's neon border & glow.",
 		Style = Library.ColorPickerStyles.Legacy,
 		Callback = function(color)
-			-- переливающийся градиент строим из выбранного цвета (+ небольшой блик)
-			local seq = ColorSequence.new({
-				ColorSequenceKeypoint.new(0.0, color),
-				ColorSequenceKeypoint.new(0.5, Library:lighten(color, 25)),
-				ColorSequenceKeypoint.new(1.0, color)
-			})
-			neonGradient.Color = seq
-			neonGlowGradient.Color = seq
-			neonGlow.Color = color
+			Library:setWindowNeon(color)
 		end,
 	}
 
@@ -1034,10 +1760,7 @@ function Library:create(options)
 		Description = "Neon color of buttons, sliders, dropdowns, etc.",
 		Style = Library.ColorPickerStyles.Legacy,
 		Callback = function(color)
-			Library.NeonColors.button = color
-			for _, s in next, Library.NeonStrokes.button do
-				s.Color = color
-			end
+			Library:setButtonNeon(color)
 		end,
 	}
 
@@ -1046,10 +1769,114 @@ function Library:create(options)
 		Description = "Neon color of the tab buttons.",
 		Style = Library.ColorPickerStyles.Legacy,
 		Callback = function(color)
-			Library.NeonColors.tab = color
-			for _, s in next, Library.NeonStrokes.tab do
-				s.Color = color
+			Library:setTabNeon(color)
+		end,
+	}
+
+	-- ===== Configs (save / load / delete / autoload) =====
+	local selectedConfig = nil
+	local configNameInput = ""
+	local configDropdown
+
+	local function refreshConfigDropdown()
+		if not configDropdown then return end
+		pcall(function() configDropdown:Clear() end)
+		-- Clear() уничтожает старые кнопки асинхронно (по завершении твина ~0.2с),
+		-- поэтому AddItems вызываем ПОСЛЕ этого, иначе Clear снесёт только что добавленные.
+		task.spawn(function()
+			task.wait(0.35)
+			local list = Library:listConfigs()
+			if #list > 0 then
+				pcall(function() configDropdown:AddItems(list) end)
 			end
+		end)
+	end
+
+	settingsTab:textbox{
+		Name = "Config Name",
+		Description = "Name used when saving a config",
+		Callback = function(text)
+			configNameInput = text or ""
+		end,
+	}
+
+	configDropdown = settingsTab:dropdown{
+		Name = "Configs",
+		StartingText = "Select config...",
+		Description = "Pick a saved config to load / delete / autoload",
+		Items = Library:listConfigs(),
+		Callback = function(item)
+			selectedConfig = item
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Save / Rewrite Config",
+		Description = "Save current colors under the entered name (overwrites if exists)",
+		Callback = function()
+			if configNameInput == "" then
+				mt:notification{ Title = "Configs", Text = "Enter a config name first", Duration = 3 }
+				return
+			end
+			if Library:saveConfig(configNameInput) then
+				refreshConfigDropdown()
+				mt:notification{ Title = "Configs", Text = "Saved: " .. configNameInput, Duration = 3 }
+			else
+				mt:notification{ Title = "Configs", Text = "Save failed (executor lacks writefile?)", Duration = 4 }
+			end
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Load Config",
+		Description = "Load the config selected in the dropdown",
+		Callback = function()
+			if not selectedConfig then
+				mt:notification{ Title = "Configs", Text = "Select a config in the dropdown", Duration = 3 }
+				return
+			end
+			if Library:loadConfig(selectedConfig) then
+				mt:notification{ Title = "Configs", Text = "Loaded: " .. selectedConfig, Duration = 3 }
+			else
+				mt:notification{ Title = "Configs", Text = "Load failed", Duration = 3 }
+			end
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Delete Config",
+		Description = "Delete the config selected in the dropdown",
+		Callback = function()
+			if not selectedConfig then
+				mt:notification{ Title = "Configs", Text = "Select a config in the dropdown", Duration = 3 }
+				return
+			end
+			Library:deleteConfig(selectedConfig)
+			mt:notification{ Title = "Configs", Text = "Deleted: " .. selectedConfig, Duration = 3 }
+			selectedConfig = nil
+			refreshConfigDropdown()
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Set as Autoload",
+		Description = "Auto-load the selected config every time the script starts",
+		Callback = function()
+			if not selectedConfig then
+				mt:notification{ Title = "Configs", Text = "Select a config in the dropdown", Duration = 3 }
+				return
+			end
+			Library:setAutoload(selectedConfig)
+			mt:notification{ Title = "Configs", Text = "Autoload set: " .. selectedConfig, Duration = 3 }
+		end,
+	}
+
+	settingsTab:button{
+		Name = "Clear Autoload",
+		Description = "Stop auto-loading any config on startup",
+		Callback = function()
+			Library:setAutoload("")
+			mt:notification{ Title = "Configs", Text = "Autoload cleared", Duration = 3 }
 		end,
 	}
 
@@ -1063,13 +1890,22 @@ function Library:create(options)
 
 	creditsTab:credit{Name = "Abstract", Description = "UI Library Developer", Discord = "Abstract#8007", V3rmillion = "AbstractPoo"}
 	creditsTab:credit{Name = "Deity", Description = "UI Library Developer", Discord = "Deity#0228", V3rmillion = "0xDEITY"}
-	creditsTab:credit{Name = "Repository", Description = "UI Library Repository", Github="https://github.com/deeeity/mercury-lib/blob/master/src.lua"}
+	creditsTab:credit{Name = "Repository", Description = "UI Library Repository", Github="https://github.com/aeronauticafan4242/aeronauticauilib/tree/main"}
 	creditsTab:credit{
 		Name = "Tot Kto Iz Niotkuda Xploits",
 		Description = "Script Developer & UI Library Enhancements",
 		Youtube = "https://www.youtube.com/@corrective",
-		Height = 74 -- выше обычного, чтобы длинный ник поместился в 2 строки
+		Height = 74 -- haii
 	}
+
+	-- Автозагрузка сохранённого конфига (если выбран через "Set as Autoload")
+	do
+		local auto = Library:getAutoload()
+		if auto then
+			pcall(function() Library:loadConfig(auto) end)
+			pcall(function() if configDropdown then configDropdown:Set(auto) end end)
+		end
+	end
 
 	return mt
 end
@@ -1216,6 +2052,180 @@ function Library:notification(options)
 	end)
 end
 
+-- ===================================================================
+--  Feedback-уведомление (обратная связь): заголовок + текст + кнопки.
+--  Отличается от обычного :notification наличием кнопок с колбэками.
+--   * до 12 кнопок; текст переносится и НЕ перекрывает кнопки;
+--     уведомление растягивается по высоте, чтобы кнопки влезли рядами;
+--   * каждая кнопка: { Text = "...", Confirm = 0, Callback = function() end }
+--     Confirm = сколько ДОПОЛНИТЕЛЬНЫХ нажатий нужно для подтверждения
+--     (0 = действие выполняется сразу; >0 = требуется повторное подтверждение).
+--  Обычный :notification НЕ трогаем — это отдельный тип.
+-- ===================================================================
+function Library:feedback(options)
+	options = self:set_defaults({
+		Title = "Confirm",
+		Text = "Are you sure?",
+		Duration = 0,        -- 0 = висит, пока не нажмут кнопку
+		Width = 320,
+		Buttons = {},
+		Callback = function() end,   -- вызывается при закрытии уведомления
+	}, options)
+
+	local TextService = game:GetService("TextService")
+	local width = math.clamp(options.Width or 320, 280, 460)
+	local innerW = width - 22
+
+	-- нормализуем список кнопок (не больше 12)
+	local btns = {}
+	for _, b in ipairs(options.Buttons) do
+		if #btns >= 12 then break end
+		btns[#btns + 1] = {
+			Text = tostring(b.Text or "OK"),
+			Confirm = tonumber(b.Confirm) or 0,
+			Callback = b.Callback or function() end,
+		}
+	end
+	if #btns == 0 then
+		btns[1] = { Text = "OK", Confirm = 0, Callback = function() end }
+	end
+
+	-- геометрия: текст сверху (авто-высота), кнопки рядами снизу
+	local textH = TextService:GetTextSize(options.Text, 16, Enum.Font.SourceSans, Vector2.new(innerW, 100000)).Y
+	local btnW, btnH, gap = 96, 30, 8
+	local perRow = math.max(1, math.floor((innerW + gap) / (btnW + gap)))
+	local rows = math.ceil(#btns / perRow)
+	local btnsH = rows * btnH + (rows - 1) * gap
+	local frameH = 23 + textH + 12 + btnsH + 22
+
+	local noti = self.notifs:object("Frame", {
+		BackgroundTransparency = 1,
+		Theme = { BackgroundColor3 = "Main" },
+		Size = UDim2.new(0, width, 0, 0)
+	}):round(10)
+
+	noti:object("UIPadding", {
+		PaddingBottom = UDim.new(0, 11), PaddingTop = UDim.new(0, 11),
+		PaddingLeft = UDim.new(0, 11), PaddingRight = UDim.new(0, 11)
+	})
+
+	local dropShadow = noti:object("Frame", { ZIndex = 0, BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1) })
+	local _shadow = dropShadow:object("ImageLabel", {
+		Centered = true, Position = UDim2.fromScale(.5, .5), BackgroundTransparency = 1,
+		Size = UDim2.new(1, 70, 1, 70), ZIndex = 0, Image = "rbxassetid://6014261993",
+		ImageColor3 = Color3.fromRGB(0, 0, 0), ImageTransparency = 1,
+		ScaleType = Enum.ScaleType.Slice, SliceCenter = Rect.new(49, 49, 450, 450)
+	})
+
+	local icon = noti:object("ImageLabel", {
+		BackgroundTransparency = 1, ImageTransparency = 1,
+		Position = UDim2.fromOffset(1, 1), Size = UDim2.fromOffset(18, 18),
+		Image = "rbxassetid://8628681683", Theme = { ImageColor3 = "Tertiary" }
+	})
+
+	local title = noti:object("TextLabel", {
+		BackgroundTransparency = 1, Position = UDim2.fromOffset(23, 0),
+		Size = UDim2.new(1, -26, 0, 20), Font = Enum.Font.SourceSansBold,
+		Text = options.Title, Theme = { TextColor3 = "Tertiary" }, TextSize = 17,
+		TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
+		TextTruncate = Enum.TextTruncate.AtEnd, TextTransparency = 1
+	})
+
+	local text = noti:object("TextLabel", {
+		BackgroundTransparency = 1, Text = options.Text,
+		Position = UDim2.new(0, 0, 0, 23), Size = UDim2.new(1, 0, 0, textH),
+		TextSize = 16, TextTransparency = 1, TextWrapped = true,
+		TextColor3 = Color3.fromRGB(255, 255, 255),
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top
+	})
+
+	local btnContainer = noti:object("Frame", {
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 0, 0, 23 + textH + 12),
+		Size = UDim2.new(1, 0, 0, btnsH)
+	})
+	btnContainer:object("UIGridLayout", {
+		CellSize = UDim2.fromOffset(btnW, btnH),
+		CellPadding = UDim2.fromOffset(gap, gap),
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder
+	})
+
+	local _btnObjs = {}
+	local closed = false
+	local fadeOut
+	fadeOut = function()
+		if closed then return end
+		closed = true
+		task.delay(0.25, function()
+			pcall(function() noti.AbsoluteObject:Destroy() end)
+			pcall(options.Callback)
+		end)
+		icon:tween({ ImageTransparency = 1, Length = 0.2 })
+		title:tween({ TextTransparency = 1, Length = 0.2 })
+		text:tween({ TextTransparency = 1, Length = 0.2 })
+		_shadow:tween({ ImageTransparency = 1, Length = 0.2 })
+		for _, bb in ipairs(_btnObjs) do
+			pcall(function() bb:tween({ BackgroundTransparency = 1, TextTransparency = 1, Length = 0.2 }) end)
+		end
+		noti:tween({ BackgroundTransparency = 1, Length = 0.2 })
+	end
+
+	for idx, spec in ipairs(btns) do
+		local remaining = spec.Confirm
+		local button = btnContainer:object("TextButton", {
+			Theme = { BackgroundColor3 = "Secondary" },
+			Text = spec.Text, TextSize = 15,
+			TextColor3 = Color3.fromRGB(255, 255, 255),
+			BackgroundTransparency = 1, TextTransparency = 1,
+			LayoutOrder = idx, AutoButtonColor = false
+		}):round(7)
+		_btnObjs[#_btnObjs + 1] = button
+		local stroke = button:object("UIStroke", {
+			Color = (Library.NeonColors and Library.NeonColors.button) or Color3.fromRGB(170, 85, 255),
+			Transparency = 1, Thickness = 1.2
+		})
+		button.MouseEnter:Connect(function()
+			button:tween({ BackgroundColor3 = Library:lighten(Library.CurrentTheme.Secondary, 12) })
+			stroke.Transparency = 0.1
+		end)
+		button.MouseLeave:Connect(function()
+			button:tween({ BackgroundColor3 = Library.CurrentTheme.Secondary })
+			stroke.Transparency = 1
+		end)
+		button.MouseButton1Click:Connect(function()
+			if closed then return end
+			if remaining <= 0 then
+				fadeOut()
+				task.spawn(function() pcall(spec.Callback) end)
+			else
+				self:notification({
+					Title = options.Title,
+					Text = "Click " .. remaining .. " more time" .. ((remaining == 1) and "" or "s")
+						.. " on \"" .. spec.Text .. "\" to confirm your choice.",
+					Duration = 3
+				})
+				remaining = remaining - 1
+			end
+		end)
+	end
+
+	_shadow:tween({ ImageTransparency = .6, Length = 0.2 })
+	noti:tween({ BackgroundTransparency = 0, Length = 0.2, Size = UDim2.fromOffset(width, frameH) }, function()
+		icon:tween({ ImageTransparency = 0, Length = 0.2 })
+		title:tween({ TextTransparency = 0, Length = 0.2 })
+		text:tween({ TextTransparency = 0, Length = 0.2 })
+		for _, bb in ipairs(_btnObjs) do bb:tween({ BackgroundTransparency = 0, TextTransparency = 0, Length = 0.2 }) end
+	end)
+
+	if options.Duration and options.Duration > 0 then
+		task.delay(options.Duration, fadeOut)
+	end
+
+	return { Close = fadeOut }
+end
+
 function Library:tab(options)
 	options = self:set_defaults({
 		Name = "New Tab",
@@ -1259,6 +2269,11 @@ function Library:tab(options)
 	tab:object("UIPadding", {
 		PaddingTop = UDim.new(0, 10)
 	})
+
+	-- регистрируем вкладку для ре-стайла (layout mode / масштаб) и сразу
+	-- приводим её слой к текущему выбранному режиму отображения
+	Library._skinTabs[#Library._skinTabs + 1] = { container = tab.AbsoluteObject, layout = layout.AbsoluteObject }
+	pcall(function() Library:_styleLayout(layout.AbsoluteObject) end)
 
 	local tabButton = Library:object("TextButton", {
 		BackgroundTransparency = 1,
@@ -1320,23 +2335,25 @@ function Library:tab(options)
 		end)
 
 		quickAccessButton.MouseButton1Click:connect(function()
+			-- разовое появление верхней вкладки (анимация), только если её ещё нет
 			if not tabButton.Visible then
 				tabButton.Parent = self.navigation.AbsoluteObject
 				tabButton.Size = UDim2.new(0, 50, tabButton.Size.Y.Scale, tabButton.Size.Y.Offset)
 				tabButton.Visible = true
-				tabButton:fade(false, Library.CurrentTheme.Main, 0.1)			
+				tabButton:fade(false, Library.CurrentTheme.Main, 0.1)
 				tabButton:tween({Size = UDim2.new(0, 125, tabButton.Size.Y.Scale, tabButton.Size.Y.Offset), Length = 0.1})
-				for _, tabInfo in next, self.Tabs do
-					local page = tabInfo[1]
-					local button = tabInfo[2]
-					page.Visible = false
-				end
-				selectedTab:tween{BackgroundTransparency = ((selectedTab == tabButton) and 0.15) or 1}
-				selectedTab = tabButton
-				tab.Visible = true
-				tabButton.BackgroundTransparency = 0
-				Library.UrlLabel.Text = Library.Url .. "/" .. options.Name:lower()
 			end
+			-- переход на вкладку выполняем ВСЕГДА (а не только при первом появлении)
+			for _, tabInfo in next, self.Tabs do
+				local page = tabInfo[1]
+				local button = tabInfo[2]
+				page.Visible = false
+			end
+			selectedTab:tween{BackgroundTransparency = ((selectedTab == tabButton) and 0.15) or 1}
+			selectedTab = tabButton
+			tab.Visible = true
+			tabButton.BackgroundTransparency = 0
+			Library.UrlLabel.Text = Library.Url .. "/" .. options.Name:lower()
 		end)
 	end
 
@@ -1425,11 +2442,15 @@ function Library:tab(options)
 end
 
 function Library:_resize_tab()
+	local ws = Library.WindowScale or 1
 	if self.container.ClassName == "ScrollingFrame" then
-		self.container.CanvasSize = UDim2.fromOffset(0, self.layout.AbsoluteContentSize.Y + 20)
+		-- зарегистрировать/оформить любые только что добавленные компоненты
+		pcall(function() Library:_skinChildren(self.container.AbsoluteObject) end)
+		-- AbsoluteContentSize приходит уже с учётом UIScale окна -> делим обратно в локальные координаты
+		self.container.CanvasSize = UDim2.fromOffset(0, self.layout.AbsoluteContentSize.Y / ws + 20)
 	else
-		self.sectionContainer.Size = UDim2.new(1, -24, 0, self.layout.AbsoluteContentSize.Y + 20)
-		self.parentContainer.CanvasSize = UDim2.fromOffset(0, self.parentLayout.AbsoluteContentSize.Y + 20)
+		self.sectionContainer.Size = UDim2.new(1, -24, 0, self.layout.AbsoluteContentSize.Y / ws + 20)
+		self.parentContainer.CanvasSize = UDim2.fromOffset(0, self.parentLayout.AbsoluteContentSize.Y / ws + 20)
 	end
 end
 
@@ -1482,8 +2503,9 @@ function Library:toggle(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = toggleContainer:object("TextLabel", {
+		description = toggleContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -1493,6 +2515,91 @@ function Library:toggle(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	Library:_adaptRow(self, { container = toggleContainer, name = text, desc = description, pad = 66, top = 27, base = 52 })
+
+	-- iOS-пилюля для Liquid Glass (по умолчанию скрыта; в Legacy показаны иконки)
+	local pillTrack = toggleContainer:object("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -11, 0.5, 0),
+		Size = UDim2.fromOffset(46, 28),
+		BackgroundColor3 = Color3.fromRGB(120, 120, 128),
+		Visible = false
+	}):round(100)
+	-- глянцевый градиент трека (сверху ярко-белый -> книзу прозрачный): «глубокое стекло».
+	-- Включается только в V2; в V1 (зелёная пилюля) выключен -> плоский цвет.
+	local pillGloss = Instance.new("UIGradient")
+	pillGloss.Rotation = 90
+	pillGloss.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.02),
+		NumberSequenceKeypoint.new(0.5, 0.22),
+		NumberSequenceKeypoint.new(1, 0.5),
+	})
+	pillGloss.Enabled = false
+	pillGloss.Parent = pillTrack.AbsoluteObject
+	-- яркая «зеркальная» кромка (ярче сверху), видна только в V2
+	local pillRim = pillTrack:object("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Transparency = 1, Thickness = 1.3 })
+	do
+		local rg = Instance.new("UIGradient")
+		rg.Rotation = 90
+		rg.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.0),
+			NumberSequenceKeypoint.new(1, 0.75),
+		})
+		rg.Parent = pillRim.AbsoluteObject
+	end
+	local pillKnob = pillTrack:object("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 3, 0.5, 0),
+		Size = UDim2.fromOffset(22, 22),
+		BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	}):round(100)
+	-- глянец бегунка (сверху ярче) — «сочный» блик как на iOS
+	do
+		local kg = Instance.new("UIGradient")
+		kg.Rotation = 90
+		kg.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(223, 227, 235))
+		kg.Parent = pillKnob.AbsoluteObject
+	end
+	pillKnob:object("UIStroke", { Color = Color3.fromRGB(255, 255, 255), Transparency = 0.35, Thickness = 1 })
+
+	local function updatePill(state, animate)
+		local v2 = (Library.Style == "Liquid Glass V2")
+		local trackCol, trackT, knobT
+		if v2 then
+			-- яркий прозрачный белый «жидкое стекло» айфона (не серый/зелёный)
+			trackCol = Color3.fromRGB(255, 255, 255)
+			trackT = state and 0.12 or 0.3   -- включённый — плотнее/ярче
+			knobT = 0
+		else
+			trackCol = state and Color3.fromRGB(52, 199, 89) or Color3.fromRGB(120, 120, 128)
+			trackT = 0
+			knobT = 0
+		end
+		local knobPos = state and UDim2.new(0, 21, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+		if animate then
+			pillTrack:tween{ BackgroundColor3 = trackCol, BackgroundTransparency = trackT, Length = 0.15 }
+			pillKnob:tween{ Position = knobPos, BackgroundTransparency = knobT, Length = 0.15 }
+		else
+			pillTrack.BackgroundColor3 = trackCol
+			pillTrack.BackgroundTransparency = trackT
+			pillKnob.Position = knobPos
+			pillKnob.BackgroundTransparency = knobT
+		end
+	end
+
+	-- реакция на смену стиля: iOS-пилюля <-> иконки
+	local function applyStyle(style)
+		local glass = (style ~= "Legacy")
+		local v2 = (style == "Liquid Glass V2")
+		onIcon.Visible = not glass
+		offIcon.Visible = not glass
+		pillTrack.Visible = glass
+		pillGloss.Enabled = v2          -- глянец только в V2
+		pillRim.Transparency = v2 and 0.05 or 1
+		updatePill(toggled, false)
+	end
+	Library._styleHooks[#Library._styleHooks + 1] = applyStyle
+	applyStyle(Library.Style)
 
 	local function toggle()
 		toggled = not toggled
@@ -1501,6 +2608,7 @@ function Library:toggle(options)
 		else
 			onIcon:crossfade(offIcon, 0.1)
 		end
+		updatePill(toggled, true)
 		options.Callback(toggled)
 	end
 
@@ -1549,10 +2657,15 @@ function Library:toggle(options)
 		else
 			onIcon:crossfade(offIcon, 0.1)
 		end
+		updatePill(toggled, true)
 		task.spawn(function() options.Callback(toggled) end)
 	end
 
 	if options.StartingState then methods:SetState(true) end
+
+	Library:_registerSavable(options.Name, "toggle",
+		function() return toggled end,
+		function(v) methods:SetState(v and true or false) end)
 
 	return methods
 end
@@ -1575,6 +2688,18 @@ function Library:dropdown(options)
 		Size = UDim2.new(1, -20, 0, 52)
 	}):round(8)
 
+	-- Дропдаун сам меняет свой размер при раскрытии/сворачивании. Чтобы это не
+	-- сбрасывало ширину, заданную режимом отображения (колонки), берём текущую
+	-- целевую ширину из атрибутов компонента (_wScale/_wOff), а не хардкод 1,-20.
+	-- базовая (свёрнутая) высота строки дропдауна; растёт, если описание переносится
+	local function baseH()
+		return dropdownContainer.AbsoluteObject:GetAttribute("_rowBase") or 52
+	end
+	local function dw(h)
+		local ws, wo = Library:_compWidth(dropdownContainer.AbsoluteObject)
+		return UDim2.new(ws, wo, 0, h)
+	end
+
 	local text = dropdownContainer:object("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.fromOffset(10, (options.Description and 5) or 15),
@@ -1585,8 +2710,9 @@ function Library:dropdown(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = dropdownContainer:object("TextLabel", {
+		description = dropdownContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -1596,6 +2722,8 @@ function Library:dropdown(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	-- имя дропдауна не трогаем (рядом с ним справа текущий выбор), переносим только описание
+	Library:_adaptRow(self, { container = dropdownContainer, desc = description, pad = 55, top = 27, base = 52 })
 
 	local icon = dropdownContainer:object("ImageLabel", {
 		AnchorPoint = Vector2.new(1, 0),
@@ -1624,6 +2752,13 @@ function Library:dropdown(options)
 		Size = UDim2.new(1, -10, 0, 0),
 		ClipsDescendants = true
 	})
+
+	-- если описание перенеслось и строка выросла — сдвигаем список пунктов вниз под неё
+	pcall(function()
+		dropdownContainer.AbsoluteObject:GetAttributeChangedSignal("_rowBase"):Connect(function()
+			itemContainer.Position = UDim2.new(0, 5, 0, baseH() + 3)
+		end)
+	end)
 
 	selectedText.Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20)
 
@@ -1655,6 +2790,22 @@ function Library:dropdown(options)
 		else
 			items[i] = {tostring(v), v}
 		end
+	end
+
+	-- ===== Multi-select support =====
+	local multiSelect = options.MultiSelect
+	local selectedSet = {} -- value -> true
+	local currentSingle = nil -- текущий выбор для одиночного дропдауна (для сохранения)
+	local function getSelectedList()
+		local out = {}
+		for v in pairs(selectedSet) do out[#out + 1] = v end
+		return out
+	end
+	local function updateSelectedText()
+		local n = 0
+		for _ in pairs(selectedSet) do n = n + 1 end
+		selectedText.Text = (n == 0) and options.StartingText or (tostring(n) .. " selected")
+		selectedText:tween{ Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05 }
 	end
 
 	local toggle;
@@ -1701,10 +2852,24 @@ function Library:dropdown(options)
 			end)
 
 			newItem.MouseButton1Click:connect(function()
-				toggle()
-				selectedText.Text = newItem.Text
-				selectedText:tween{Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05}
-				options.Callback(value)
+				if multiSelect then
+					-- переключаем выбор, НЕ закрываем список; ✔ показывает выбранные
+					if selectedSet[value] then
+						selectedSet[value] = nil
+						newItem.Text = label
+					else
+						selectedSet[value] = true
+						newItem.Text = "✔ " .. label
+					end
+					updateSelectedText()
+					options.Callback(getSelectedList())
+				else
+					currentSingle = value
+					toggle()
+					selectedText.Text = newItem.Text
+					selectedText:tween{Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05}
+					options.Callback(value)
+				end
 			end)
 		end
 	end
@@ -1721,13 +2886,13 @@ function Library:dropdown(options)
 			open = not open
 			if open then
 				itemContainer:tween{Size = UDim2.new(1, -10, 0, newSize)}
-				dropdownContainer:tween({Size = UDim2.new(1, -20, 0, 52 + newSize)}, function()
+				dropdownContainer:tween({Size = dw(baseH() + newSize)}, function()
 					self:_resize_tab()
 				end)
 				icon:tween{Rotation = 180, Position = UDim2.new(1, -11, 0, 15)}
 			else
 				itemContainer:tween{Size = UDim2.new(1, -10, 0, 0)}
-				dropdownContainer:tween({Size = UDim2.new(1, -20, 0, 52)}, function()
+				dropdownContainer:tween({Size = dw(baseH())}, function()
 					self:_resize_tab()
 				end)
 				icon:tween{Rotation = 0, Position = UDim2.new(1, -11, 0, 12)}
@@ -1779,22 +2944,24 @@ function Library:dropdown(options)
 					table.remove(items, _2)
 					newSize = (25 * #items) + 5
 					itemContainer:tween{Size = (not open and UDim2.new(1, -10, 0, 0)) or UDim2.new(1, -10, 0, newSize)}
-					dropdownContainer:tween({Size = (not open and UDim2.new(1, -20, 0, 52)) or UDim2.new(1, -20, 0, 52 + newSize)})
+					dropdownContainer:tween({Size = (not open and dw(baseH())) or dw(baseH() + newSize)})
 				end
 			end
 		end
 	end
 
 	function methods:Clear()
-		table.clear(items)
-		itemContainer:tween{Size = UDim2.new(1, -10, 0, 0)}
-		dropdownContainer:tween({Size = UDim2.new(1, -20, 0, 52)}, function()
-			for i, v in next, itemContainer.AbsoluteObject:GetChildren() do
-				if v.ClassName == "TextButton" then
-					v:Destroy()
-				end
+		-- Уничтожаем кнопки СРАЗУ (не в колбэке твина): иначе AddItems сразу после Clear
+		-- давал пустой список — отложенный destroy сносил только что добавленные кнопки.
+		for _, v in next, itemContainer.AbsoluteObject:GetChildren() do
+			if v.ClassName == "TextButton" then
+				v:Destroy()
 			end
-		end)
+		end
+		table.clear(items)
+		if selectedSet then table.clear(selectedSet) end -- сбрасываем выбор, чтобы галочки совпадали с новым списком
+		itemContainer:tween{Size = UDim2.new(1, -10, 0, 0)}
+		dropdownContainer:tween({Size = dw(baseH())})
 		if open then toggle() end
 	end
 
@@ -1809,7 +2976,7 @@ function Library:dropdown(options)
 
 		newSize = (25 * #items) + 5
 		itemContainer:tween{Size = (not open and UDim2.new(1, -10, 0, 0)) or UDim2.new(1, -10, 0, newSize)}
-		dropdownContainer:tween({Size = (not open and UDim2.new(1, -20, 0, 52)) or UDim2.new(1, -20, 0, 52 + newSize)})
+		dropdownContainer:tween({Size = (not open and dw(baseH())) or dw(baseH() + newSize)})
 
 		for i, item in next, items do
 			local label = item[1]
@@ -1855,12 +3022,24 @@ function Library:dropdown(options)
 				end)
 
 				newItem.MouseButton1Click:connect(function()
-					toggle()
-					selectedText.Text = newItem.Text
-					selectedText:tween{Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05}
-					options.Callback(value)
+					if multiSelect then
+						if selectedSet[value] then
+							selectedSet[value] = nil
+							newItem.Text = label
+						else
+							selectedSet[value] = true
+							newItem.Text = "✔ " .. label
+						end
+						updateSelectedText()
+						options.Callback(getSelectedList())
+					else
+						toggle()
+						selectedText.Text = newItem.Text
+						selectedText:tween{Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05}
+						options.Callback(value)
+					end
 				end)
-			end		
+			end
 		end
 
 		Library._resize_tab({
@@ -1868,6 +3047,53 @@ function Library:dropdown(options)
 			layout = layout
 		})
 	end
+
+	-- вернуть список выбранных (для MultiSelect)
+	function methods:GetSelected()
+		return getSelectedList()
+	end
+
+	-- программно выбрать значения (MultiSelect: массив; одиночный: одно значение)
+	local function applySelection(v)
+		if multiSelect then
+			local want = {}
+			if type(v) == "table" then
+				for _, val in ipairs(v) do want[val] = true end
+			end
+			selectedSet = {}
+			for _, it in pairs(items) do
+				local pair, btn = it[1], it[2]
+				if type(pair) == "table" and btn then
+					local label, value = pair[1], pair[2]
+					if want[value] then
+						selectedSet[value] = true
+						btn.Text = "✔ " .. label
+					else
+						btn.Text = label
+					end
+				end
+			end
+			updateSelectedText()
+			task.spawn(function() options.Callback(getSelectedList()) end)
+		else
+			currentSingle = v
+			for _, it in pairs(items) do
+				local pair, btn = it[1], it[2]
+				if type(pair) == "table" and btn and pair[2] == v then
+					selectedText.Text = btn.Text
+					selectedText:tween{ Size = UDim2.fromOffset(selectedText.TextBounds.X + 20, 20), Length = 0.05 }
+					break
+				end
+			end
+			task.spawn(function() options.Callback(v) end)
+		end
+	end
+
+	Library:_registerSavable(options.Name, "dropdown",
+		function()
+			if multiSelect then return getSelectedList() else return currentSingle end
+		end,
+		applySelection)
 
 	return methods
 end
@@ -1946,8 +3172,9 @@ function Library:button(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = buttonContainer:object("TextLabel", {
+		description = buttonContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -1957,6 +3184,7 @@ function Library:button(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	Library:_adaptRow(self, { container = buttonContainer, name = text, desc = description, pad = 55, top = 27, base = 52 })
 
 	local icon = buttonContainer:object("ImageLabel", {
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -2037,8 +3265,9 @@ function Library:color_picker(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = buttonContainer:object("TextLabel", {
+		description = buttonContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -2048,6 +3277,7 @@ function Library:color_picker(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	Library:_adaptRow(self, { container = buttonContainer, name = text, desc = description, pad = 55, top = 27, base = 52 })
 
 	local icon = buttonContainer:object("ImageLabel", {
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -2892,7 +4122,7 @@ function Library:credit(options)
 	options = self:set_defaults({
 		Name = "Creditor",
 		Description = nil,
-		Height = 52 -- высота карточки; увеличь, если длинное имя переносится на 2 строки
+		Height = 52 -- card height; increase it if a long name wraps to 2 lines
 	}, options)
 	options.V3rmillion = options.V3rmillion or options.V3rm
 
@@ -2902,8 +4132,8 @@ function Library:credit(options)
 		Size = UDim2.new(1, -20, 0, options.Height)
 	}):round(8)
 
-	-- Имя: переносится на следующую строку, если не помещается (TextWrapped), выравнено по верху.
-	-- Ширина с запасом справа (-44), чтобы текст не залезал под иконку контакта.
+	-- Name: wraps to the next line if it doesn't fit (TextWrapped), top-aligned.
+	-- Width leaves room on the right (-44) so the text doesn't slip under the contact icon.
 	local name = creditContainer:object("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.fromOffset(10, 4),
@@ -3036,7 +4266,7 @@ function Library:credit(options)
 				BackgroundColor3 = Color3.fromRGB(255, 0, 0)
 			}):round(5):tooltip("copy youtube")
 			local youtube = youtubeContainer:object("ImageLabel", {
-				Image = "http://www.roblox.com/asset/?id=645664329", -- YouTube-иконка (поменяй id здесь при необходимости)
+				Image = "http://www.roblox.com/asset/?id=4504423143", -- yt icon
 				Size = UDim2.new(1, -4, 1, -4),
 				Centered = true,
 				BackgroundTransparency = 1
@@ -3067,6 +4297,10 @@ function Library:_theme_selector()
 		Theme = {BackgroundColor3 = "Secondary"},
 		Size = UDim2.new(1, -20, 0, 127)
 	}):round(7)
+
+	-- у выбора темы своя внутренняя сетка (UIGridLayout) фиксированного размера —
+	-- не даём режиму колонок сжимать его ширину, иначе превью тем уезжают за край
+	themeContainer.AbsoluteObject:SetAttribute("_noskin", true)
 
 	local text = themeContainer:object("TextLabel", {
 		BackgroundTransparency = 1,
@@ -3195,8 +4429,9 @@ function Library:keybind(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = keybindContainer:object("TextLabel", {
+		description = keybindContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -3206,6 +4441,7 @@ function Library:keybind(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	Library:_adaptRow(self, { container = keybindContainer, name = text, desc = description, pad = 100, top = 27, base = 52 })
 
 
 	local keybindDisplay = keybindContainer:object("TextLabel", {
@@ -3279,6 +4515,14 @@ function Library:keybind(options)
 		keybindDisplay.Text = (options.Keybind and tostring(options.Keybind.Name):upper()) or "?"
 		keybindDisplay:tween{Size = UDim2.fromOffset(keybindDisplay.TextBounds.X + 20, 20), Length = 0.05}
 	end
+
+	Library:_registerSavable(options.Name, "keybind",
+		function() return options.Keybind and options.Keybind.Name or nil end,
+		function(v)
+			if type(v) ~= "string" then return end
+			local ok, kc = pcall(function() return Enum.KeyCode[v] end)
+			if ok and kc then methods:Set(kc) end
+		end)
 
 	return methods
 end
@@ -3471,8 +4715,9 @@ function Library:slider(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = sliderContainer:object("TextLabel", {
+		description = sliderContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -3483,6 +4728,8 @@ function Library:slider(options)
 		})
 		sliderContainer.Size = UDim2.new(1, -20, 0, 76)
 	end
+	-- у слайдера снизу полоса прокрутки -> резервируем больше места снизу (bottom = 28)
+	Library:_adaptRow(self, { container = sliderContainer, name = text, desc = description, pad = 80, top = 27, base = 76, bottom = 28 })
 
 	local valueText = sliderContainer:object("TextLabel", {
 		AnchorPoint = Vector2.new(1, 0),
@@ -3522,6 +4769,7 @@ function Library:slider(options)
 	do
 		local hovered = false
 		local down = false
+		local dragging = false
 
 		sliderContainer.MouseEnter:connect(function()
 			hovered = true
@@ -3535,30 +4783,37 @@ function Library:slider(options)
 			end
 		end)
 
-		UserInputService.InputEnded:connect(function(key)
-			if key.UserInputType == Enum.UserInputType.MouseButton1 then
-				down = false
-				sliderContainer:tween{BackgroundColor3 = (hovered and self:lighten(Library.CurrentTheme.Secondary)) or Library.CurrentTheme.Secondary}
+		-- обновление позиции из КООРДИНАТЫ САМОГО input'а (а не Mouse.X) — так работает и мышью, и касанием,
+		-- без дёрганья «из стороны в сторону» на мобилках (Mouse.X на тач залипает/скачет).
+		local function updateFromX(px)
+			local percentage = math.clamp((px - sliderBar.AbsolutePosition.X) / (sliderBar.AbsoluteSize.X), 0, 1)
+			local value = math.floor(((options.Max - options.Min) * percentage) + options.Min)
+			valueText.Text = value
+			valueText.Size = UDim2.fromOffset(valueText.TextBounds.X + 20, 20)
+			sliderLine:tween{ Length = 0.06, Size = UDim2.fromScale(percentage, 1) }
+			options.Callback(value)
+		end
+
+		sliderContainer.InputBegan:connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				down = true
+				dragging = true
+				sliderContainer:tween{BackgroundColor3 = self:lighten(Library.CurrentTheme.Secondary, 20)}
+				updateFromX(input.Position.X)
 			end
 		end)
 
-		sliderContainer.MouseButton1Down:connect(function()
-			sliderContainer:tween{BackgroundColor3 = self:lighten(Library.CurrentTheme.Secondary, 20)}
-			down = true
-			local tween = valueText:tween{Size = UDim2.fromOffset(valueText.TextBounds.X + 20, 20)}
-			while RunService.RenderStepped:wait() and down do
-				local percentage = math.clamp((Mouse.X - sliderBar.AbsolutePosition.X) / (sliderBar.AbsoluteSize.X), 0, 1)
-				local value = ((options.Max - options.Min) * percentage) + options.Min
-				value = math.floor(value)
-				valueText.Text = value
-				if tween.PlaybackState == Enum.PlaybackState.Completed then
-					tween = valueText:tween{Size = UDim2.fromOffset(valueText.TextBounds.X + 20, 20)}
-				end
-				sliderLine:tween{
-					Length = 0.06,
-					Size = UDim2.fromScale(percentage, 1)
-				}
-				options.Callback(value)
+		UserInputService.InputChanged:connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				updateFromX(input.Position.X)
+			end
+		end)
+
+		UserInputService.InputEnded:connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+				dragging = false
+				down = false
+				sliderContainer:tween{BackgroundColor3 = (hovered and self:lighten(Library.CurrentTheme.Secondary)) or Library.CurrentTheme.Secondary}
 			end
 		end)
 	end
@@ -3569,6 +4824,16 @@ function Library:slider(options)
 	function methods:Set(value)
 		sliderLine:tween{Size = UDim2.fromScale(((value - options.Min) / (options.Max - options.Min)), 1)}
 	end
+
+	Library:_registerSavable(options.Name, "slider",
+		function() return tonumber(valueText.Text) or options.Default end,
+		function(v)
+			v = math.clamp(tonumber(v) or options.Default, options.Min, options.Max)
+			valueText.Text = v
+			valueText.Size = UDim2.fromOffset(valueText.TextBounds.X + 20, 20)
+			sliderLine:tween{Size = UDim2.fromScale(((v - options.Min) / (options.Max - options.Min)), 1)}
+			task.spawn(function() options.Callback(v) end)
+		end)
 
 	return methods
 end
@@ -3597,8 +4862,9 @@ function Library:textbox(options)
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 
+	local description
 	if options.Description then
-		local description = textboxContainer:object("TextLabel", {
+		description = textboxContainer:object("TextLabel", {
 			BackgroundTransparency = 1,
 			Position = UDim2.fromOffset(10, 27),
 			Size = UDim2.new(0.5, -10, 0, 20),
@@ -3608,6 +4874,9 @@ function Library:textbox(options)
 			TextXAlignment = Enum.TextXAlignment.Left
 		})
 	end
+	-- pad=180: у текстбокса поле ввода справа широкое (~160px с плейсхолдером),
+	-- поэтому резервируем больше места, чтобы описание не залезало под него.
+	Library:_adaptRow(self, { container = textboxContainer, name = text, desc = description, pad = 180, top = 27, base = 52 })
 
 
 	local textBox = textboxContainer:object("TextBox", {
@@ -3684,6 +4953,13 @@ function Library:textbox(options)
 	function methods:Set(text)
 		textBox.Text = text
 	end
+
+	Library:_registerSavable(options.Name, "textbox",
+		function() return textBox.Text end,
+		function(v)
+			textBox.Text = tostring(v)
+			task.spawn(function() options.Callback(textBox.Text) end)
+		end)
 
 	return methods
 end
