@@ -1442,19 +1442,10 @@ function Library:create(options)
 			end)
 			local id = (ok and code) and FLAG_DECALS[code] or nil
 			if id then
-				-- ImageLabel НЕ рендерит decal-id напрямую -> резолвим декал в его Texture (настоящий image-id).
-				local img = "http://www.roblox.com/asset/?id=" .. id -- fallback (формат как у луны)
-				local ok2, tex = pcall(function()
-					local m = game:GetService("InsertService"):LoadAsset(tonumber(id))
-					local d = m and m:FindFirstChildWhichIsA("Decal", true)
-					local t = d and d.Texture
-					if m then m:Destroy() end
-					return t
-				end)
-				if ok2 and tex and tex ~= "" then img = tex end
+				-- id = textureID (не decal!) -> рендерится напрямую, как луна.
 				pcall(function()
 					local ic = homeButtonIcon.AbsoluteObject
-					ic.Image = img
+					ic.Image = "rbxassetid://" .. id
 					ic.ImageColor3 = Color3.new(1, 1, 1)
 					ic.ImageTransparency = 0
 					ic.ScaleType = Enum.ScaleType.Fit -- сохраняем пропорции флага
