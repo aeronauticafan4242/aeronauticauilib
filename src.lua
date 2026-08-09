@@ -487,6 +487,41 @@ Library.WindowOpacity = 0.8    -- 1 = непрозрачно; по умолча�
 Library.Style        = "Legacy" -- "Legacy" | "Liquid Glass" (iOS-стекло)
 Library._styleHooks  = {}      -- функции компонентов, которым нужна структурная смена (тогглы-пилюли)
 
+-- ===== Иконки вкладок / кнопок (Star / Moon / My Own) =====
+Library.STAR_ICON = "rbxassetid://126568844277588" -- звезда (по умолчанию)
+Library.MOON_ICON = "rbxassetid://8569322835"      -- луна (старый дефолт)
+Library.TabIconMode    = "Star"  -- иконка ВО вкладках (навигационная строка сверху)
+Library.ButtonIconMode = "Star"  -- иконка в КНОПКАХ быстрого доступа (ведут во вкладки)
+Library.CustomIconId   = ""      -- свой textureID для режима "My Own"
+Library._tabIconObjs   = {}      -- ImageLabel'ы иконок во вкладках (real Instances)
+Library._quickIconObjs = {}      -- ImageLabel'ы иконок в кнопках быстрого доступа
+
+-- режим -> строка Image. "My Own" без валидного id -> звезда (дефолт).
+function Library:_resolveIcon(mode)
+	if mode == "Moon" then
+		return Library.MOON_ICON
+	elseif mode == "My Own" then
+		local id = tostring(Library.CustomIconId or ""):match("%d+")
+		if id and id ~= "" then return "rbxassetid://" .. id end
+		return Library.STAR_ICON
+	end
+	return Library.STAR_ICON -- "Star" и всё неизвестное
+end
+
+function Library:_applyTabIcons()
+	local img = Library:_resolveIcon(Library.TabIconMode)
+	for _, ic in ipairs(Library._tabIconObjs) do
+		pcall(function() ic.Image = img end)
+	end
+end
+
+function Library:_applyButtonIcons()
+	local img = Library:_resolveIcon(Library.ButtonIconMode)
+	for _, ic in ipairs(Library._quickIconObjs) do
+		pcall(function() ic.Image = img end)
+	end
+end
+
 -- Эти настройки меню сохраняются ВСЕГДА (даже если "Save all settings" выключен)
 local ALWAYS_SAVE = {
 	["Toggle Key"] = true,
@@ -499,7 +534,10 @@ local ALWAYS_SAVE = {
 	["Layout Mode"] = true,
 	["Particles"] = true,
 	["Particle Type"] = true,
-	["UI Style"] = true
+	["UI Style"] = true,
+	["Tab Icon"] = true,
+	["Button Icon"] = true,
+	["Custom Icon ID"] = true
 }
 
 function Library:_registerSavable(key, kind, getFn, setFn)
@@ -1751,6 +1789,40 @@ function Library:create(options)
 		end,
 	}
 
+	-- ===== Иконки: во вкладках / в кнопках-переходах (Star / Moon / My Own) =====
+	settingsTab:dropdown{
+		Name = "Tab Icon",
+		StartingText = "Star",
+		Description = "Icon shown IN the tabs (top navigation strip). \"My Own\" uses the Custom Icon ID below.",
+		Items = { "Star", "Moon", "My Own" },
+		Callback = function(mode)
+			Library.TabIconMode = mode
+			Library:_applyTabIcons()
+		end,
+	}
+
+	settingsTab:dropdown{
+		Name = "Button Icon",
+		StartingText = "Star",
+		Description = "Icon on the quick-access buttons that open tabs. \"My Own\" uses the Custom Icon ID below.",
+		Items = { "Star", "Moon", "My Own" },
+		Callback = function(mode)
+			Library.ButtonIconMode = mode
+			Library:_applyButtonIcons()
+		end,
+	}
+
+	settingsTab:textbox{
+		Name = "Custom Icon ID",
+		Description = "Your own image/texture ID (numbers only). Applied wherever Tab/Button Icon is set to \"My Own\".",
+		Callback = function(text)
+			Library.CustomIconId = text or ""
+			-- пере-применяем обе иконки: покрывает и смену id, и порядок загрузки конфига
+			Library:_applyTabIcons()
+			Library:_applyButtonIcons()
+		end,
+	}
+
 	settingsTab:button{
 		Name = "Reset Appearance",
 		Description = "Reset opacity, size, element size, layout and particles to defaults.",
@@ -1764,6 +1836,9 @@ function Library:create(options)
 				["Layout Mode"] = "Vertical (List)",
 				["Particles"] = false,
 				["Particle Type"] = "Sparks",
+				["Tab Icon"] = "Star",
+				["Button Icon"] = "Star",
+				["Custom Icon ID"] = "",
 			}
 			for _, s in ipairs(Library._savable) do
 				if defaults[s.key] ~= nil then
@@ -2269,6 +2344,10 @@ function Library:tab(options)
 		Icon = "rbxassetid://8569322835"
 	}, options)
 
+	-- иконку переключаем (Star/Moon/My Own) ТОЛЬКО у вкладок с дефолтной луной;
+	-- вкладки со своей иконкой (напр. Settings-шестерёнка) не трогаем.
+	local iconIsDefault = (options.Icon == Library.MOON_ICON)
+
 	local tab = self.container:object("ScrollingFrame", {
 		AnchorPoint = Vector2.new(0, 1),
 		Visible = false,
@@ -2294,6 +2373,11 @@ function Library:tab(options)
 			Size = UDim2.fromScale(0.5, 0.5),
 			Centered = true
 		})
+		-- регистрируем иконку кнопки быстрого доступа и сразу применяем выбранный режим
+		if iconIsDefault then
+			Library._quickIconObjs[#Library._quickIconObjs + 1] = quickAccessIcon.AbsoluteObject
+			pcall(function() quickAccessIcon.AbsoluteObject.Image = Library:_resolveIcon(Library.ButtonIconMode) end)
+		end
 	else
 		quickAccessButton = options.Internal
 	end
@@ -2415,6 +2499,11 @@ function Library:tab(options)
 		Image = options.Icon,
 		Theme = {ImageColor3 = "StrongText"}
 	})
+	-- регистрируем иконку во вкладке (навигация) и сразу применяем выбранный режим
+	if iconIsDefault then
+		Library._tabIconObjs[#Library._tabIconObjs + 1] = tabButtonIcon.AbsoluteObject
+		pcall(function() tabButtonIcon.AbsoluteObject.Image = Library:_resolveIcon(Library.TabIconMode) end)
+	end
 
 	local tabButtonClose = tabButton:object("ImageButton", {
 		AnchorPoint = Vector2.new(1, 0.5),
