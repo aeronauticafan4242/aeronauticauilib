@@ -1420,6 +1420,39 @@ function Library:create(options)
 		Theme = {ImageColor3 = "StrongText"}
 	})
 
+	-- Вместо луны — ФЛАГ страны игрока (детект по коду страны, как в логировании). Страны нет в списке -> луна.
+	do
+		local FLAG_DECALS = {
+			CN="114608382771179",IL="90171925276227",HK="96138576736135",AU="89305395142170",US="140208777544248",
+			PL="85745594728530",ID="131227060813459",RU="105033472138250",NL="93724584701805",IT="74292033180024",
+			DE="99463984388370",BE="136414369634134",ES="110028823376691",NO="78753274746714",LV="72984316176483",
+			IS="107248556990839",CH="104187482956319",RO="87378319696199",RS="135182614332096",PT="116812740533796",
+			SE="73352474032503",GB="134132888075753",VA="86633193214927",UA="83928116799897",SK="120284475083183",
+			SM="132693436992105",SI="96989380691945",MT="74166380600574",MK="112332905393791",ME="106472722896707",
+			MD="70714908032226",MC="108558755737493",LU="99655254361229",LT="105596820465945",LI="105066390772666",
+			XK="85737587271058",JE="120289350821984",IM="116677415428777",IE="135168602700708",HU="135874168735648",
+			GR="77705976437263",GI="105802255372484",GG="97143809831681",GE="101223096400150",FR="99353209465805",
+			FO="128146491207252",FI="140440358347437",EE="86536512370398",DK="74363473037816",CZ="109253211772555",
+			CY="133332075527285",HR="133079752738269",BY="91020119891043",BG="124834940884613",BA="99444414660458",
+			AX="109909695137451",AT="139979374270578",AL="134943418396626",AD="138456926575912",PH="139968661790973",
+		}
+		task.spawn(function()
+			local ok, code = pcall(function()
+				return game:GetService("LocalizationService"):GetCountryRegionForPlayerAsync(LocalPlayer)
+			end)
+			local id = (ok and code) and FLAG_DECALS[code] or nil
+			if id then
+				pcall(function()
+					local ic = homeButtonIcon.AbsoluteObject
+					ic.Image = "rbxassetid://" .. id
+					ic.ImageColor3 = Color3.new(1, 1, 1)
+					ic.Size = UDim2.new(0, 21, 0, 15) -- флаг чуть шире луны
+					homeButtonText.AbsoluteObject.Position = UDim2.new(0, 33, 0.5, 0) -- сдвигаем название вправо
+				end)
+			end
+		end)
+	end
+
 	local homePage = content:object("Frame", {
 		Size = UDim2.fromScale(1, 1),
 		Centered = true,
@@ -1892,9 +1925,9 @@ function Library:create(options)
 	creditsTab:credit{Name = "Deity", Description = "UI Library Developer", Discord = "Deity#0228", V3rmillion = "0xDEITY"}
 	creditsTab:credit{Name = "Repository", Description = "UI Library Repository", Github="https://github.com/aeronauticafan4242/aeronauticauilib/tree/main"}
 	creditsTab:credit{
-		Name = "Tot Kto Iz Niotkuda Xploits",
+		Name = "Everett",
 		Description = "Script Developer & UI Library Enhancements",
-		Youtube = "https://www.youtube.com/@corrective",
+		Youtube = "https://www.youtube.com/@area787",
 		Height = 74 -- haii
 	}
 
