@@ -1444,10 +1444,13 @@ function Library:create(options)
 			if id then
 				pcall(function()
 					local ic = homeButtonIcon.AbsoluteObject
-					ic.Image = "rbxassetid://" .. id
+					-- rbxthumb надёжно рендерит asset/decal как картинку (rbxassetid для декалов часто пустой)
+					ic.Image = "rbxthumb://type=Asset&id=" .. id .. "&w=150&h=150"
 					ic.ImageColor3 = Color3.new(1, 1, 1)
-					ic.Size = UDim2.new(0, 21, 0, 15) -- флаг чуть шире луны
-					homeButtonText.AbsoluteObject.Position = UDim2.new(0, 33, 0.5, 0) -- сдвигаем название вправо
+					ic.ImageTransparency = 0
+					ic.ScaleType = Enum.ScaleType.Fit -- сохраняем пропорции флага
+					ic.Size = UDim2.new(0, 24, 0, 18) -- флаг чуть крупнее луны
+					homeButtonText.AbsoluteObject.Position = UDim2.new(0, 36, 0.5, 0) -- сдвигаем название вправо
 				end)
 			end
 		end)
