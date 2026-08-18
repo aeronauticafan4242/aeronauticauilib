@@ -775,7 +775,13 @@ function Library:_adaptRow(tabSelf, o)
 		local top    = o.top or 27
 		local base   = o.base or raw.Size.Y.Offset
 		local bottom = o.bottom or 10
+		-- ГВАРД от рекурсии: установка raw.Size синхронно меняет AbsoluteSize описания -> снова
+		-- дёргает fit -> "Maximum event re-entrancy depth exceeded". Пока fit выполняется, вложенные
+		-- вызовы игнорируем; финальную сходимость доберут последующие (асинхронные) срабатывания сигнала.
+		local fitBusy = false
 		local function fit()
+			if fitBusy then return end
+			fitBusy = true
 			local total = (Library.WindowScale or 1) * (Library.ElementScale or 1)
 			if total <= 0 then total = 1 end
 			local dh = descInst.AbsoluteSize.Y / total
@@ -787,6 +793,7 @@ function Library:_adaptRow(tabSelf, o)
 				raw.Size = UDim2.new(raw.Size.X.Scale, raw.Size.X.Offset, 0, newH)
 				pcall(function() tabSelf:_resize_tab() end)
 			end
+			fitBusy = false
 		end
 		pcall(function() descInst:GetPropertyChangedSignal("AbsoluteSize"):Connect(fit) end)
 		task.defer(fit)
